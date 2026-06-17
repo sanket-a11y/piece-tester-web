@@ -18,13 +18,13 @@ export const setPlanTool: ToolDefinition = {
           type: 'object' as const,
           properties: {
             id: { type: 'string', description: 'Unique step ID, e.g. "step_1"' },
-            type: { type: 'string', enum: ['setup', 'test', 'verify', 'cleanup', 'human_input', 'trigger_test'], description: 'setup=create resources, test=the actual action being tested, verify=check result, cleanup=tear down, human_input=ask user for a value, trigger_test=run the piece trigger under test' },
+            type: { type: 'string', enum: ['setup', 'test', 'verify', 'cleanup', 'human_input', 'trigger_arm', 'trigger_test'], description: 'setup=create resources, test=the action being tested, verify=check result, cleanup=tear down, human_input=ask user for a value, trigger_arm=arm a webhook trigger listener (SIMULATION, runs BEFORE the generator step), trigger_test=run/capture the piece trigger under test' },
             label: { type: 'string', description: 'Short human-readable label' },
             description: { type: 'string', description: 'Longer explanation of what this step does and why' },
-            actionName: { type: 'string', description: 'The Activepieces action name to execute (empty for human_input and trigger_test steps)' },
-            kind: { type: 'string', enum: ['action', 'trigger'], description: 'Step kind. Omit or "action" for normal action steps. Use "trigger" for the trigger_test step.' },
-            triggerName: { type: 'string', description: 'For kind="trigger": the trigger name to run.' },
-            triggerStrategy: { type: 'string', enum: ['TEST_FUNCTION'], description: 'For kind="trigger": how to test it. Use TEST_FUNCTION for POLLING triggers.' },
+            actionName: { type: 'string', description: 'The Activepieces action name to execute (empty for human_input, trigger_arm and trigger_test steps)' },
+            kind: { type: 'string', enum: ['action', 'trigger'], description: 'Step kind. Omit or "action" for normal action steps. Use "trigger" for trigger_arm and trigger_test steps.' },
+            triggerName: { type: 'string', description: 'For kind="trigger": the trigger name to arm/run.' },
+            triggerStrategy: { type: 'string', enum: ['TEST_FUNCTION', 'SIMULATION'], description: 'For kind="trigger": TEST_FUNCTION for POLLING triggers (single trigger_test step); SIMULATION for WEBHOOK/APP_WEBHOOK triggers (trigger_arm -> generator action -> trigger_test).' },
             input: { type: 'object' as const, description: 'Static input values for this step. Auth is added automatically.', additionalProperties: true },
             inputMapping: {
               type: 'object' as const,
@@ -50,8 +50,8 @@ export const setPlanTool: ToolDefinition = {
 /** Parse the raw tool input into a typed TestPlanResult. */
 export function parsePlanFromToolInput(input: Record<string, any>): { steps: TestPlanStep[]; note: string; agentMemory?: string } {
   const steps: TestPlanStep[] = (input.steps || []).map((s: any) => {
-    // A step is a trigger step if explicitly marked, or if it's a trigger_test type with a triggerName.
-    const isTrigger = s.kind === 'trigger' || (s.type === 'trigger_test' && !!s.triggerName);
+    // A step is a trigger step if explicitly marked, or if it's a trigger_arm/trigger_test type with a triggerName.
+    const isTrigger = s.kind === 'trigger' || ((s.type === 'trigger_test' || s.type === 'trigger_arm') && !!s.triggerName);
     return {
       id: s.id || `step_${Math.random().toString(36).slice(2, 6)}`,
       type: s.type || 'test',

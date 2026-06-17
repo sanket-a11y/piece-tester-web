@@ -433,20 +433,48 @@ export async function fixTestPlanV2(params: {
 // Trigger test plans
 // ══════════════════════════════════════════════════════════════
 
-function validateTriggerPlanDeterministically(triggerName: string, steps: TestPlanStep[]): DeterministicPlanValidationResult {
+function validateTriggerPlanDeterministically(
+  triggerName: string,
+  steps: TestPlanStep[],
+  strategy: string | undefined,
+): DeterministicPlanValidationResult {
   const issues: string[] = [];
-  const triggerSteps = steps.filter(s => s.kind === 'trigger' || s.type === 'trigger_test');
+  const isSimulation = strategy === 'WEBHOOK' || strategy === 'APP_WEBHOOK';
 
-  if (triggerSteps.length !== 1) {
-    issues.push(`Expected exactly one trigger_test step, found ${triggerSteps.length}.`);
+  const testSteps = steps.filter(s => s.type === 'trigger_test');
+  const armSteps = steps.filter(s => s.type === 'trigger_arm');
+
+  if (testSteps.length !== 1) {
+    issues.push(`Expected exactly one trigger_test step, found ${testSteps.length}.`);
   } else {
-    const ts = triggerSteps[0];
+    const ts = testSteps[0];
     const name = ts.triggerName || ts.actionName;
     if (name !== triggerName) {
       issues.push(`The trigger_test step targets "${name}" but the plan is for "${triggerName}".`);
     }
-    if (ts.triggerStrategy && ts.triggerStrategy !== 'TEST_FUNCTION') {
-      issues.push(`Trigger strategy "${ts.triggerStrategy}" is not supported in Phase A (polling/TEST_FUNCTION only).`);
+  }
+
+  if (isSimulation) {
+    // Webhook plans: arm (first) -> generator action(s) -> capture (last).
+    if (armSteps.length !== 1) {
+      issues.push(`SIMULATION (${strategy}) plans need exactly one trigger_arm step, found ${armSteps.length}.`);
+    }
+    const armIdx = steps.findIndex(s => s.type === 'trigger_arm');
+    const testIdx = steps.findIndex(s => s.type === 'trigger_test');
+    if (armIdx >= 0 && testIdx >= 0) {
+      if (armIdx > testIdx) {
+        issues.push('The trigger_arm step must come before the trigger_test step.');
+      }
+      const between = steps.slice(armIdx + 1, testIdx);
+      const hasGenerator = between.some(s => s.kind !== 'trigger' && s.type !== 'human_input');
+      if (!hasGenerator) {
+        issues.push('SIMULATION plans need at least one generator action step between trigger_arm and trigger_test to cause the event (or note that the event must be produced manually).');
+      }
+    }
+  } else {
+    // Polling plans: TEST_FUNCTION, no arm step.
+    if (armSteps.length > 0) {
+      issues.push(`POLLING trigger "${triggerName}" should use TEST_FUNCTION (no trigger_arm step), found ${armSteps.length}.`);
     }
   }
 
@@ -489,8 +517,10 @@ export async function createTriggerTestPlanV2(params: {
 
   const strategy = pieceMeta.triggers[triggerName].type;
   onLog({ timestamp: Date.now(), type: 'phase', role: 'coordinator', message: `Planning trigger "${triggerName}" (strategy: ${strategy})...`, detail: 'planning' });
-  if (strategy && strategy !== 'POLLING') {
-    onLog({ timestamp: Date.now(), type: 'thinking', role: 'coordinator', message: `Note: "${strategy}" triggers are not fully automatable yet (Phase A handles POLLING). Producing a best-effort plan.` });
+  if (strategy === 'WEBHOOK' || strategy === 'APP_WEBHOOK') {
+    onLog({ timestamp: Date.now(), type: 'thinking', role: 'coordinator', message: `"${strategy}" trigger -> SIMULATION plan (arm -> generator action -> capture). If no action can fire it, capture may need a manual event.` });
+  } else if (strategy && strategy !== 'POLLING') {
+    onLog({ timestamp: Date.now(), type: 'thinking', role: 'coordinator', message: `Note: "${strategy}" triggers are not directly testable; producing a best-effort plan.` });
   }
 
   onLog({ timestamp: Date.now(), type: 'worker_spawn', role: 'coordinator', message: 'Spawning trigger planner worker...' });
@@ -516,7 +546,7 @@ export async function createTriggerTestPlanV2(params: {
     return withCost(plan);
   }
 
-  const validation = validateTriggerPlanDeterministically(triggerName, plan.steps);
+  const validation = validateTriggerPlanDeterministically(triggerName, plan.steps, strategy);
   if (!validation.ok) {
     for (const issue of validation.issues) {
       onLog({ timestamp: Date.now(), type: 'error', role: 'coordinator', message: issue });

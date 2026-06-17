@@ -288,6 +288,8 @@ export interface StepResult {
   error: string | null;
   duration_ms: number;
   humanResponse?: string;
+  /** Live progress log lines (e.g. webhook subscribe/receive during trigger steps). */
+  logs?: string[];
 }
 
 export interface PlanProgress {

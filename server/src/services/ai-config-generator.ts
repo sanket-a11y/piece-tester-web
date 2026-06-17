@@ -47,7 +47,7 @@ export interface AiActionResult {
 
 export interface TestPlanStep {
   id: string;
-  type: 'setup' | 'test' | 'verify' | 'cleanup' | 'human_input' | 'trigger_test';
+  type: 'setup' | 'test' | 'verify' | 'cleanup' | 'human_input' | 'trigger_arm' | 'trigger_test';
   label: string;
   description: string;
   actionName: string;

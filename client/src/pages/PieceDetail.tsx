@@ -1163,18 +1163,20 @@ export default function PieceDetail() {
             })}
           </div>
 
-          {/* Triggers list (Phase A: polling triggers) */}
+          {/* Triggers list */}
           {triggerList.length > 0 && (
             <div className="mb-6">
               <div className="flex items-center gap-2 mb-2">
                 <h3 className="text-sm font-semibold text-gray-300">Triggers</h3>
                 <span className="text-xs text-gray-500">{triggerList.length}</span>
-                <span className="text-[10px] text-gray-600">· polling triggers run via test-trigger; webhook triggers coming soon</span>
+                <span className="text-[10px] text-gray-600">· polling = test-trigger; webhook = arm → fire → capture</span>
               </div>
               <div className="space-y-2">
                 {triggerList.map(([triggerName, triggerMeta]) => {
                   const strategy: string = triggerMeta.type || 'UNKNOWN';
                   const isPolling = strategy === 'POLLING';
+                  const isWebhook = strategy === 'WEBHOOK' || strategy === 'APP_WEBHOOK';
+                  const isSupported = isPolling || isWebhook;
                   const hasPlan = !!triggerPlans[triggerName];
                   const planStatus = triggerPlans[triggerName]?.status;
                   const isPlanOpen = planTrigger === triggerName;
@@ -1204,7 +1206,10 @@ export default function PieceDetail() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-sm font-medium text-gray-200">{triggerMeta.displayName || triggerName}</span>
                             <span className="text-[10px] text-gray-500 font-mono">{triggerName}</span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${isPolling ? 'bg-green-500/10 text-green-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                              isPolling ? 'bg-green-500/10 text-green-400'
+                              : isWebhook ? 'bg-blue-500/10 text-blue-400'
+                              : 'bg-amber-500/10 text-amber-400'}`}>
                               {strategy}
                             </span>
                             {hasPlan && (
@@ -1216,13 +1221,18 @@ export default function PieceDetail() {
                           {triggerMeta.description && (
                             <p className="text-xs text-gray-500 mt-0.5 truncate">{triggerMeta.description}</p>
                           )}
-                          {!isPolling && (
+                          {isWebhook && (
+                            <p className="text-[10px] text-blue-400/70 mt-0.5">
+                              Webhook trigger — tested by arming a listener, firing a generator action, then capturing the event.
+                            </p>
+                          )}
+                          {!isSupported && (
                             <p className="text-[10px] text-amber-500/80 mt-0.5">
-                              {strategy} triggers aren't fully automatable yet — Phase A handles polling triggers.
+                              {strategy} triggers can't be tested automatically.
                             </p>
                           )}
                         </div>
-                        {hasAnthropicKey ? (
+                        {hasAnthropicKey && isSupported ? (
                           <button
                             onClick={() => { setPlanTrigger(isPlanOpen ? null : triggerName); }}
                             className={`text-[10px] px-2 py-1 rounded flex items-center gap-1 font-medium ${
@@ -1231,9 +1241,9 @@ export default function PieceDetail() {
                           >
                             <Brain size={10} /> {hasPlan ? 'View Plan' : hasActiveJob ? 'View Progress' : 'AI Test'}
                           </button>
-                        ) : (
+                        ) : !hasAnthropicKey ? (
                           <span className="text-[10px] text-gray-600">Add API key</span>
-                        )}
+                        ) : null}
                       </div>
 
                       {isPlanOpen && (
@@ -1393,6 +1403,7 @@ export default function PieceDetail() {
                               verify: 'text-cyan-400 bg-cyan-500/10',
                               cleanup: 'text-orange-400 bg-orange-500/10',
                               human_input: 'text-purple-400 bg-purple-500/10',
+                              trigger_arm: 'text-teal-400 bg-teal-500/10',
                               trigger_test: 'text-green-400 bg-green-500/10',
                             };
 
@@ -1413,6 +1424,13 @@ export default function PieceDetail() {
                                     <span className="text-[10px] text-gray-500">{(sr.duration_ms / 1000).toFixed(1)}s</span>
                                   )}
                                 </div>
+
+                                {/* Live step logs (e.g. webhook subscribe/receive) */}
+                                {sr?.logs && sr.logs.length > 0 && (
+                                  <div className="ml-8 mt-1 text-[10px] text-gray-400 bg-gray-800/50 rounded p-1.5 font-mono space-y-0.5 max-h-32 overflow-y-auto">
+                                    {sr.logs.map((line, i) => <div key={i}>{line}</div>)}
+                                  </div>
+                                )}
 
                                 {/* Step error */}
                                 {sr?.error && (

@@ -19,6 +19,7 @@ const STEP_TYPE_CONFIG: Record<string, { label: string; color: string; bg: strin
   verify:      { label: 'Verify',      color: 'text-cyan-400',   bg: 'bg-cyan-500/10',   border: 'border-cyan-500/30' },
   cleanup:     { label: 'Cleanup',     color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' },
   human_input: { label: 'Human Input', color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30' },
+  trigger_arm: { label: 'Arm Trigger', color: 'text-teal-400',   bg: 'bg-teal-500/10',   border: 'border-teal-500/30' },
   trigger_test:{ label: 'Trigger',     color: 'text-green-400',  bg: 'bg-green-500/10',  border: 'border-green-500/30' },
 };
 
@@ -795,6 +796,16 @@ export default function TestPlanView({
                             </button>
                           </div>
                         )}
+                      </div>
+                    )}
+
+                    {/* Live step logs (e.g. webhook subscribe/receive) */}
+                    {sr?.logs && sr.logs.length > 0 && (
+                      <div>
+                        <span className="text-gray-400 font-medium">Logs:</span>
+                        <pre className="mt-1 bg-gray-800/50 rounded p-2 overflow-x-auto text-gray-300/80 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap">
+                          {sr.logs.join('\n')}
+                        </pre>
                       </div>
                     )}
 
