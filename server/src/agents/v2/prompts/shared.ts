@@ -106,6 +106,11 @@ CRITICAL -- THIS IS THE ONLY VALID SYNTAX: \${steps.<stepId>.output.<path>}
 
 NEVER flag \${steps.xxx} as "wrong syntax" -- it IS the correct format for this system's plan executor.
 
+The expression may stand alone as the whole field value (preserves the original type -- object/array/number),
+OR be embedded inside a larger string, which interpolates as text. Both are valid:
+- Whole value: { "issue_id": "\${steps.step_1.output.issue.id}" }
+- Embedded in a string (e.g. a GraphQL query): { "query": "{ issue(id: \\"\${steps.step_1.output.issue.id}\\") { id title } }" }
+
 Example for "Add reaction to message":
 - Step 1 (setup): send_message with input: { "channel": "C12345", "text": "[AI Test] {{$uuid}}" }
 - Step 2 (test): add_reaction with:

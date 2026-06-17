@@ -99,6 +99,29 @@ function resolveBuiltinTokens(input: Record<string, unknown>): Record<string, un
 
 // ── InputMapping resolver ──
 
+/** Navigate ${steps.<refStepId>.<pathStr>} against prior step results. Returns undefined if unresolved. */
+function resolveStepRef(
+  refStepId: string,
+  pathStr: string,
+  previousResults: Map<string, StepResult>,
+): unknown {
+  const refResult = previousResults.get(refStepId);
+  if (!refResult) {
+    console.warn(`[plan-executor] inputMapping: step "${refStepId}" not found in results`);
+    return undefined;
+  }
+  // Navigate the path (e.g. "output.ts", "output.issue.id", "humanResponse")
+  let value: any = refResult;
+  for (const part of pathStr.split('.')) {
+    if (value === null || value === undefined) break;
+    value = value[part];
+  }
+  if (value === undefined) {
+    console.warn(`[plan-executor] inputMapping: path "${pathStr}" resolved to undefined for step "${refStepId}"`);
+  }
+  return value;
+}
+
 function resolveInputMapping(
   step: TestPlanStep,
   previousResults: Map<string, StepResult>,
@@ -110,34 +133,32 @@ function resolveInputMapping(
   }
 
   for (const [fieldName, expression] of Object.entries(step.inputMapping)) {
-    // expression format: ${steps.<stepId>.output.<path>} or ${steps.<stepId>.humanResponse}
-    const match = expression.match(/^\$\{steps\.([^.]+)\.(.+)\}$/);
-    if (!match) {
-      // Not a valid expression, use as literal
-      resolved[fieldName] = expression;
+    // Case 1: the WHOLE value is a single ${steps.<id>.<path>} expression.
+    // Resolve to the raw value so non-string outputs (objects/arrays/numbers) are preserved.
+    const whole = expression.match(/^\$\{steps\.([^.]+)\.(.+)\}$/);
+    if (whole) {
+      const value = resolveStepRef(whole[1], whole[2], previousResults);
+      if (value !== undefined) resolved[fieldName] = value;
       continue;
     }
 
-    const [, refStepId, pathStr] = match;
-    const refResult = previousResults.get(refStepId);
-    if (!refResult) {
-      console.warn(`[plan-executor] inputMapping: step "${refStepId}" not found in results`);
+    // Case 2: one or more ${steps.<id>.<path>} expressions embedded inside a larger
+    // string (e.g. a GraphQL query like `{ issue(id: "${steps.step_1.output.issue.id}") }`).
+    // Interpolate each occurrence; unresolved refs are left intact.
+    if (expression.includes('${steps.')) {
+      resolved[fieldName] = expression.replace(
+        /\$\{steps\.([^.}]+)\.([^}]+)\}/g,
+        (matchStr, refStepId, pathStr) => {
+          const value = resolveStepRef(refStepId, pathStr, previousResults);
+          if (value === undefined) return matchStr;
+          return typeof value === 'string' ? value : JSON.stringify(value);
+        },
+      );
       continue;
     }
 
-    // Navigate the path (e.g. "output.ts" or "humanResponse")
-    const pathParts = pathStr.split('.');
-    let value: any = refResult;
-    for (const part of pathParts) {
-      if (value === null || value === undefined) break;
-      value = value[part];
-    }
-
-    if (value !== undefined) {
-      resolved[fieldName] = value;
-    } else {
-      console.warn(`[plan-executor] inputMapping: path "${pathStr}" resolved to undefined for step "${refStepId}"`);
-    }
+    // Not an expression at all -- use as a literal.
+    resolved[fieldName] = expression;
   }
 
   return resolveBuiltinTokens(resolved);
