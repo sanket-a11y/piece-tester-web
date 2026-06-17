@@ -24,7 +24,12 @@ export type OnLogCallback = (log: AgentLogEntry) => void;
 
 export interface ToolContext {
   pieceMeta: PieceMetadataFull;
+  /** The target being planned. For trigger plans this holds the trigger name. */
   actionName: string;
+  /** Whether the plan target is an action (default) or a trigger. */
+  targetKind?: 'action' | 'trigger';
+  /** For trigger plans: the trigger name under test (same value as actionName). */
+  triggerName?: string;
   abortSignal?: AbortSignal;
   mcpEnabled?: boolean;
 }

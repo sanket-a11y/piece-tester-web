@@ -54,6 +54,9 @@ export default function PieceDetail() {
   // ── Test Plan view (unified AI approach) ──
   const [planAction, setPlanAction] = useState<string | null>(null);
   const [actionPlans, setActionPlans] = useState<Record<string, TestPlan>>({});
+  // Trigger plans (Phase A: polling triggers), keyed by trigger name
+  const [planTrigger, setPlanTrigger] = useState<string | null>(null);
+  const [triggerPlans, setTriggerPlans] = useState<Record<string, TestPlan>>({});
   const [setupAllRunning, setSetupAllRunning] = useState(false);
   const [setupMode, setSetupMode] = useState<'create_missing' | 'replace_existing' | null>(null);
   const [setupAllProgress, setSetupAllProgress] = useState<{ current: number; total: number; currentAction: string } | null>(null);
@@ -146,12 +149,18 @@ export default function PieceDetail() {
       try {
         const plans = await api.listTestPlans(name);
         const planMap: Record<string, TestPlan> = {};
+        const triggerMap: Record<string, TestPlan> = {};
         const enabled = new Set(enabledActions);
         for (const p of plans) {
-          planMap[p.target_action] = p;
-          enabled.add(p.target_action);
+          if (p.target_type === 'trigger') {
+            triggerMap[p.target_action] = p;
+          } else {
+            planMap[p.target_action] = p;
+            enabled.add(p.target_action);
+          }
         }
         setActionPlans(planMap);
+        setTriggerPlans(triggerMap);
         setEnabledActions(enabled);
       } catch {
         // No plans yet
@@ -569,6 +578,26 @@ export default function PieceDetail() {
     }
   }, [name]);
 
+  // Callback for the trigger TestPlanView to notify parent when a trigger plan changes
+  const onTriggerPlanChange = useCallback((triggerName: string, plan: TestPlan | null) => {
+    setTriggerPlans(prev => {
+      const next = { ...prev };
+      if (plan) next[triggerName] = plan;
+      else delete next[triggerName];
+      return next;
+    });
+    setActiveAiJobs(prev => {
+      const key = `v2:trigger:${triggerName}`;
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    if (name) {
+      api.getAiPlanJobs(name).then(setActiveAiJobs).catch(() => {});
+    }
+  }, [name]);
+
   function toggleAction(actionName: string) {
     setEnabledActions(prev => {
       const next = new Set(prev);
@@ -730,6 +759,7 @@ export default function PieceDetail() {
   const authType = piece.auth?.type;
   const isOAuth = authType === 'OAUTH2' || authType === 'PLATFORM_OAUTH2';
   const actionList = Object.entries(piece.actions || {}) as [string, any][];
+  const triggerList = Object.entries(piece.triggers || {}) as [string, any][];
   const hasAnthropicKey = settings?.has_anthropic_key;
 
   return (
@@ -752,6 +782,7 @@ export default function PieceDetail() {
           <p className="text-sm text-gray-400 mt-1">{piece.description}</p>
           <div className="flex gap-4 mt-2 text-xs text-gray-500">
             <span>{actionList.length} actions</span>
+            {triggerList.length > 0 && <span>{triggerList.length} triggers</span>}
             {authType ? (
               <span className="bg-gray-800 px-2 py-0.5 rounded">Auth: {authType}</span>
             ) : (
@@ -1105,6 +1136,83 @@ export default function PieceDetail() {
               );
             })}
           </div>
+
+          {/* Triggers list (Phase A: polling triggers) */}
+          {triggerList.length > 0 && (
+            <div className="mb-6">
+              <div className="flex items-center gap-2 mb-2">
+                <h3 className="text-sm font-semibold text-gray-300">Triggers</h3>
+                <span className="text-xs text-gray-500">{triggerList.length}</span>
+                <span className="text-[10px] text-gray-600">· polling triggers run via test-trigger; webhook triggers coming soon</span>
+              </div>
+              <div className="space-y-2">
+                {triggerList.map(([triggerName, triggerMeta]) => {
+                  const strategy: string = triggerMeta.type || 'UNKNOWN';
+                  const isPolling = strategy === 'POLLING';
+                  const hasPlan = !!triggerPlans[triggerName];
+                  const planStatus = triggerPlans[triggerName]?.status;
+                  const isPlanOpen = planTrigger === triggerName;
+                  const jobStatus = activeAiJobs[`v2:trigger:${triggerName}`]?.status;
+                  const hasActiveJob = jobStatus === 'running' || jobStatus === 'pending';
+
+                  return (
+                    <div key={triggerName} className={`rounded-lg border ${isPlanOpen ? 'border-purple-500/30 bg-purple-500/5' : 'border-gray-800 bg-gray-900'}`}>
+                      <div className="flex items-center gap-3 px-3 py-2.5">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-medium text-gray-200">{triggerMeta.displayName || triggerName}</span>
+                            <span className="text-[10px] text-gray-500 font-mono">{triggerName}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${isPolling ? 'bg-green-500/10 text-green-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                              {strategy}
+                            </span>
+                            {hasPlan && (
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${planStatus === 'approved' ? 'bg-green-500/10 text-green-400' : 'bg-gray-700 text-gray-400'}`}>
+                                {planStatus === 'approved' ? 'approved' : 'draft'}
+                              </span>
+                            )}
+                          </div>
+                          {triggerMeta.description && (
+                            <p className="text-xs text-gray-500 mt-0.5 truncate">{triggerMeta.description}</p>
+                          )}
+                          {!isPolling && (
+                            <p className="text-[10px] text-amber-500/80 mt-0.5">
+                              {strategy} triggers aren't fully automatable yet — Phase A handles polling triggers.
+                            </p>
+                          )}
+                        </div>
+                        {hasAnthropicKey ? (
+                          <button
+                            onClick={() => { setPlanTrigger(isPlanOpen ? null : triggerName); }}
+                            className={`text-[10px] px-2 py-1 rounded flex items-center gap-1 font-medium ${
+                              isPlanOpen ? 'bg-purple-600 text-white' : 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30'
+                            }`}
+                          >
+                            <Brain size={10} /> {hasPlan ? 'View Plan' : hasActiveJob ? 'View Progress' : 'AI Test'}
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-gray-600">Add API key</span>
+                        )}
+                      </div>
+
+                      {isPlanOpen && (
+                        <div className="border-t border-purple-500/20 px-3 pb-3 pt-2">
+                          <TestPlanView
+                            pieceName={name!}
+                            actionName={triggerName}
+                            actionDisplayName={triggerMeta.displayName || triggerName}
+                            targetKind="trigger"
+                            hasAnthropicKey={hasAnthropicKey}
+                            onClose={() => setPlanTrigger(null)}
+                            onPlanChange={(plan) => onTriggerPlanChange(triggerName, plan)}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Run button */}
           {(() => {

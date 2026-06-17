@@ -59,6 +59,13 @@ router.get('/by-action/:pieceName/:actionName', (req, res) => {
   res.json({ ...plan, steps: safeParseJson(plan.steps) });
 });
 
+// Get plan by piece + trigger (must be before /:id to avoid matching "by-trigger" as id)
+router.get('/by-trigger/:pieceName/:triggerName', (req, res) => {
+  const plan = db.getTestPlanByTrigger(req.params.pieceName, req.params.triggerName);
+  if (!plan) return res.status(404).json({ error: 'No plan found' });
+  res.json({ ...plan, steps: safeParseJson(plan.steps) });
+});
+
 // ── Global plan run history (must be before /runs/:runId) ──
 router.get('/runs/all', (req, res) => {
   const pieceName = req.query.piece as string | undefined;

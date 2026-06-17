@@ -9,6 +9,7 @@ import {
   getTestPlan, type TestPlanRunRow,
 } from '../db/queries.js';
 import { executeActionOnAP, type TestPlanStep } from './ai-config-generator.js';
+import { executeTriggerOnAP } from './trigger-engine.js';
 import { createClient } from './test-engine.js';
 import type { PieceMetadataFull } from './ap-client.js';
 
@@ -125,6 +126,22 @@ function resolveInputMapping(
   }
 
   return resolveBuiltinTokens(resolved);
+}
+
+// ── Step dispatch ──
+// An action step runs a piece action via test-step; a trigger step runs a piece
+// trigger via the test-trigger endpoint. Both resolve auth/input the same way.
+
+async function executeStepOnAP(
+  pieceMeta: PieceMetadataFull,
+  step: TestPlanStep,
+  resolvedInput: Record<string, unknown>,
+): Promise<unknown> {
+  if (step.kind === 'trigger') {
+    const triggerName = step.triggerName || step.actionName;
+    return executeTriggerOnAP(pieceMeta, triggerName, resolvedInput, step.triggerStrategy || 'TEST_FUNCTION');
+  }
+  return executeActionOnAP(pieceMeta, step.actionName, resolvedInput);
 }
 
 // ── Main executor ──
@@ -317,8 +334,8 @@ export async function executePlan(
         // Resolve inputMapping
         const resolvedInput = resolveInputMapping(step, stepResults);
 
-        // Execute the action
-        const output = await executeActionOnAP(pieceMeta, step.actionName, resolvedInput);
+        // Execute the step (action via test-step, or trigger via test-trigger)
+        const output = await executeStepOnAP(pieceMeta, step, resolvedInput);
 
         sr.status = 'completed';
         sr.output = output;
@@ -348,7 +365,7 @@ export async function executePlan(
         });
 
         // If a setup or test step fails, stop the plan (but still run cleanup steps)
-        if (step.type === 'setup' || step.type === 'test') {
+        if (step.type === 'setup' || step.type === 'test' || step.type === 'trigger_test') {
           // Skip remaining non-cleanup steps, run cleanup steps
           const currentIdx = steps.indexOf(step);
           for (let i = currentIdx + 1; i < steps.length; i++) {
@@ -360,7 +377,7 @@ export async function executePlan(
               saveResults();
               try {
                 const cleanupInput = resolveInputMapping(futureStep, stepResults);
-                const cleanupOutput = await executeActionOnAP(pieceMeta, futureStep.actionName, cleanupInput);
+                const cleanupOutput = await executeStepOnAP(pieceMeta, futureStep, cleanupInput);
                 futureSr.status = 'completed';
                 futureSr.output = cleanupOutput;
               } catch {

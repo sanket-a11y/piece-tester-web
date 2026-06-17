@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import axios from 'axios';
 import { getSettings, getConnectionByPiece } from '../db/queries.js';
 import type { PieceMetadataFull, PieceActionMeta } from './ap-client.js';
+import { ActivepiecesClient } from './ap-client.js';
 import { createClient } from './test-engine.js';
 import { buildConnectionValue, makeExternalId } from './connection-builder.js';
 import { formatLessonsForPrompt } from './lesson-extractor.js';
@@ -46,7 +47,7 @@ export interface AiActionResult {
 
 export interface TestPlanStep {
   id: string;
-  type: 'setup' | 'test' | 'verify' | 'cleanup' | 'human_input';
+  type: 'setup' | 'test' | 'verify' | 'cleanup' | 'human_input' | 'trigger_test';
   label: string;
   description: string;
   actionName: string;
@@ -56,6 +57,15 @@ export interface TestPlanStep {
   humanPrompt?: string;
   /** Saved human response for automatic reuse in future/scheduled runs */
   savedHumanResponse?: string;
+  /**
+   * Step kind. 'action' (default) executes a piece action via test-step.
+   * 'trigger' executes a piece trigger via the test-trigger endpoint.
+   */
+  kind?: 'action' | 'trigger';
+  /** For kind==='trigger': the piece trigger name to test. */
+  triggerName?: string;
+  /** For kind==='trigger': how to test it. Phase A supports TEST_FUNCTION (polling). */
+  triggerStrategy?: 'TEST_FUNCTION' | 'SIMULATION';
 }
 
 export interface TestPlanResult {
@@ -477,12 +487,21 @@ export async function fixActionWithAi(
 // Action executor
 // ══════════════════════════════════════════════════════════════
 
-export async function executeActionOnAP(pieceMeta: PieceMetadataFull, actionName: string, input: Record<string, unknown>): Promise<unknown> {
-  if (!pieceMeta.actions[actionName]) {
-    throw new Error(`Action "${actionName}" not found. Available: ${Object.keys(pieceMeta.actions).join(', ')}`);
-  }
-
-  const apClient = createClient();
+/**
+ * Resolve the auth field for a piece flow step (action or trigger).
+ *
+ * Upserts/locates the user's connection in AP and returns:
+ *  - authInput: `{ auth: "{{connections.<externalId>}}" }` (empty when NO_AUTH / no connection)
+ *  - inputWithoutAuth: the original input with any raw `auth` value stripped, so authInput
+ *    always wins and a model-supplied raw auth never overrides the real connection ref.
+ *
+ * Shared by executeActionOnAP and executeTriggerOnAP.
+ */
+export async function resolveConnectionAuthInput(
+  apClient: ActivepiecesClient,
+  pieceMeta: PieceMetadataFull,
+  input: Record<string, unknown>,
+): Promise<{ authInput: Record<string, unknown>; inputWithoutAuth: Record<string, unknown> }> {
   const connRow = getConnectionByPiece(pieceMeta.name);
   const authInput: Record<string, unknown> = {};
 
@@ -517,6 +536,17 @@ export async function executeActionOnAP(pieceMeta: PieceMetadataFull, actionName
       authInput['auth'] = `{{connections.${rawInputAuth}}}`;
     }
   }
+
+  return { authInput, inputWithoutAuth };
+}
+
+export async function executeActionOnAP(pieceMeta: PieceMetadataFull, actionName: string, input: Record<string, unknown>): Promise<unknown> {
+  if (!pieceMeta.actions[actionName]) {
+    throw new Error(`Action "${actionName}" not found. Available: ${Object.keys(pieceMeta.actions).join(', ')}`);
+  }
+
+  const apClient = createClient();
+  const { authInput, inputWithoutAuth } = await resolveConnectionAuthInput(apClient, pieceMeta, input);
 
   const flow = await apClient.createFlow(`[AI Agent] ${pieceMeta.displayName} - ${actionName}`);
   try {

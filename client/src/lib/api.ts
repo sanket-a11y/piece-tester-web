@@ -263,6 +263,8 @@ export interface TestPlan {
   id: number;
   piece_name: string;
   target_action: string;
+  /** 'action' (default) or 'trigger'. */
+  target_type?: 'action' | 'trigger';
   steps: TestPlanStep[];
   status: 'draft' | 'approved';
   agent_memory: string;
@@ -475,6 +477,44 @@ function streamAiPlanV2(
 ): AbortController {
   const controller = new AbortController();
   let url = `${BASE}/pieces/${encodeURIComponent(pieceName)}/actions/${encodeURIComponent(actionName)}/ai-plan-v2`;
+  if (previousMemory) url += `?memory=${encodeURIComponent(previousMemory)}`;
+
+  (async () => {
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) {
+        const errText = await response.text();
+        callbacks.onError(`HTTP ${response.status}: ${errText}`);
+        callbacks.onDone();
+        return;
+      }
+      await readSSE(response, {
+        log: (d: any) => callbacks.onLog(d),
+        result: (d: any) => callbacks.onResult(d),
+        plan_progress: (d: any) => callbacks.onPlanProgress?.(d),
+        error: (d: any) => callbacks.onError(d.message || 'Unknown error'),
+        done: () => callbacks.onDone(),
+      });
+      callbacks.onDone();
+    } catch (err: any) {
+      if (err.name !== 'AbortError') { callbacks.onError(err.message); callbacks.onDone(); }
+    }
+  })();
+
+  return controller;
+}
+
+/**
+ * Stream AI TRIGGER plan creation via SSE (v2 trigger planner, polling triggers).
+ */
+function streamTriggerPlanV2(
+  pieceName: string,
+  triggerName: string,
+  callbacks: PlanStreamCallbacks,
+  previousMemory?: string,
+): AbortController {
+  const controller = new AbortController();
+  let url = `${BASE}/pieces/${encodeURIComponent(pieceName)}/triggers/${encodeURIComponent(triggerName)}/ai-plan-v2`;
   if (previousMemory) url += `?memory=${encodeURIComponent(previousMemory)}`;
 
   (async () => {
@@ -744,9 +784,19 @@ export const api = {
   // Test Plans (v2 multi-agent)
   streamAiPlanV2,
   streamAiPlanFixV2,
+  // Trigger plans (v2 trigger planner)
+  streamTriggerPlanV2,
+  /** Cancel a running background trigger plan-creation job. */
+  cancelTriggerPlanV2Job: (pieceName: string, triggerName: string) =>
+    request<{ cancelled: boolean }>(
+      'POST',
+      `/pieces/${encodeURIComponent(pieceName)}/triggers/${encodeURIComponent(triggerName)}/ai-plan-v2/cancel`,
+    ),
   getTestPlan: (planId: number) => request<TestPlan>('GET', `/test-plans/${planId}`),
   getTestPlanByAction: (pieceName: string, actionName: string) =>
     request<TestPlan>('GET', `/test-plans/by-action/${encodeURIComponent(pieceName)}/${encodeURIComponent(actionName)}`),
+  getTestPlanByTrigger: (pieceName: string, triggerName: string) =>
+    request<TestPlan>('GET', `/test-plans/by-trigger/${encodeURIComponent(pieceName)}/${encodeURIComponent(triggerName)}`),
   updateTestPlan: (planId: number, data: { steps?: TestPlanStep[]; status?: string; agent_memory?: string }) =>
     request<TestPlan>('PATCH', `/test-plans/${planId}`, data),
   deleteTestPlan: (planId: number) => request<any>('DELETE', `/test-plans/${planId}`),

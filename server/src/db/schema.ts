@@ -156,6 +156,7 @@ function initTables(db: DatabaseAdapter): void {
       run_id INTEGER NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
       piece_name TEXT NOT NULL,
       action_name TEXT NOT NULL,
+      test_type TEXT NOT NULL DEFAULT 'action',
       status TEXT NOT NULL,
       duration_ms INTEGER DEFAULT 0,
       flow_run_id TEXT,
@@ -179,12 +180,13 @@ function initTables(db: DatabaseAdapter): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       piece_name TEXT NOT NULL,
       target_action TEXT NOT NULL,
+      target_type TEXT NOT NULL DEFAULT 'action',
       steps TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'draft',
       agent_memory TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
-      UNIQUE(piece_name, target_action)
+      UNIQUE(piece_name, target_action, target_type)
     );
 
     CREATE TABLE IF NOT EXISTS piece_lessons (
@@ -295,6 +297,45 @@ function initTables(db: DatabaseAdapter): void {
   const planCols = db.pragma(`table_info(test_plans)`) as { name: string }[];
   if (planCols.length > 0 && !planCols.some(c => c.name === 'automation_status')) {
     db.exec(`ALTER TABLE test_plans ADD COLUMN automation_status TEXT NOT NULL DEFAULT 'unknown'`);
+  }
+
+  // Migration: add target_type column to test_plans + relax the UNIQUE constraint to
+  // (piece_name, target_action, target_type) so an action and a trigger of the same name
+  // can each have a plan. SQLite can't alter a UNIQUE constraint, so recreate the table.
+  if (planCols.length > 0 && !planCols.some(c => c.name === 'target_type')) {
+    // Disable FK enforcement during the rebuild: test_plan_runs references test_plans(id)
+    // with ON DELETE CASCADE, so dropping the old table with FKs on would wipe run history.
+    // IDs are preserved below, so the child references stay valid after the rename.
+    db.exec(`PRAGMA foreign_keys = OFF;`);
+    db.exec(`
+      CREATE TABLE test_plans_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        piece_name TEXT NOT NULL,
+        target_action TEXT NOT NULL,
+        target_type TEXT NOT NULL DEFAULT 'action',
+        steps TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'draft',
+        agent_memory TEXT DEFAULT '',
+        automation_status TEXT NOT NULL DEFAULT 'unknown',
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(piece_name, target_action, target_type)
+      );
+      INSERT INTO test_plans_new
+        (id, piece_name, target_action, target_type, steps, status, agent_memory, automation_status, created_at, updated_at)
+      SELECT id, piece_name, target_action, 'action', steps, status, agent_memory,
+             COALESCE(automation_status, 'unknown'), created_at, updated_at
+      FROM test_plans;
+      DROP TABLE test_plans;
+      ALTER TABLE test_plans_new RENAME TO test_plans;
+    `);
+    db.exec(`PRAGMA foreign_keys = ON;`);
+  }
+
+  // Migration: add test_type column to test_results if missing
+  const resultCols = db.pragma(`table_info(test_results)`) as { name: string }[];
+  if (resultCols.length > 0 && !resultCols.some(c => c.name === 'test_type')) {
+    db.exec(`ALTER TABLE test_results ADD COLUMN test_type TEXT NOT NULL DEFAULT 'action'`);
   }
 
   db.exec(`

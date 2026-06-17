@@ -17,6 +17,7 @@ import type {
 import type { BrokenMapping } from './tools/inspect-output.js';
 import { runResearchWorker } from './workers/research.js';
 import { runPlannerWorker } from './workers/planner.js';
+import { runTriggerPlannerWorker } from './workers/trigger-planner.js';
 import { runVerifierWorker } from './workers/verifier.js';
 import { runFixerWorker } from './workers/fixer.js';
 import { synthesizePlannerSpec, parseResearchFindings } from './prompts/coordinator.js';
@@ -426,4 +427,102 @@ export async function fixTestPlanV2(params: {
 
   onLog({ timestamp: Date.now(), type: 'done', role: 'coordinator', message: 'Fix complete.' });
   return withCost(fixedPlan);
+}
+
+// ══════════════════════════════════════════════════════════════
+// Trigger test plans
+// ══════════════════════════════════════════════════════════════
+
+function validateTriggerPlanDeterministically(triggerName: string, steps: TestPlanStep[]): DeterministicPlanValidationResult {
+  const issues: string[] = [];
+  const triggerSteps = steps.filter(s => s.kind === 'trigger' || s.type === 'trigger_test');
+
+  if (triggerSteps.length !== 1) {
+    issues.push(`Expected exactly one trigger_test step, found ${triggerSteps.length}.`);
+  } else {
+    const ts = triggerSteps[0];
+    const name = ts.triggerName || ts.actionName;
+    if (name !== triggerName) {
+      issues.push(`The trigger_test step targets "${name}" but the plan is for "${triggerName}".`);
+    }
+    if (ts.triggerStrategy && ts.triggerStrategy !== 'TEST_FUNCTION') {
+      issues.push(`Trigger strategy "${ts.triggerStrategy}" is not supported in Phase A (polling/TEST_FUNCTION only).`);
+    }
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
+/**
+ * Create a test plan for a piece TRIGGER using the v2 agent system.
+ *
+ * Phase A runs a single trigger-planner agent that researches the trigger inline
+ * (source + live TEST_FUNCTION run) and emits a plan. Deterministic validation then
+ * checks the plan has exactly one correctly-targeted trigger_test step.
+ */
+export async function createTriggerTestPlanV2(params: {
+  pieceMeta: PieceMetadataFull;
+  triggerName: string;
+  previousMemory?: string;
+  onLog: OnLogCallback;
+  abortSignal?: AbortSignal;
+}): Promise<TestPlanResult & { costSummary?: ReturnType<CostTracker['getTotals']> }> {
+  const { pieceMeta, triggerName, previousMemory, onLog, abortSignal } = params;
+
+  const costTracker = new CostTracker({
+    pieceName: pieceMeta.name,
+    actionName: triggerName,
+    operation: 'create',
+    version: 'v2',
+  });
+
+  function withCost<T extends TestPlanResult>(plan: T): T & { costSummary: ReturnType<CostTracker['getTotals']> } {
+    const totals = costTracker.getTotals();
+    onLog({ timestamp: Date.now(), type: 'done', role: 'coordinator', message: `Total cost: $${totals.cost_usd.toFixed(4)} (${totals.requests} API calls, ${totals.input_tokens + totals.output_tokens} tokens)` });
+    return { ...plan, costSummary: totals };
+  }
+
+  if (!pieceMeta.triggers[triggerName]) {
+    onLog({ timestamp: Date.now(), type: 'error', role: 'coordinator', message: `Trigger "${triggerName}" not found.` });
+    return withCost({ steps: [], note: `Trigger "${triggerName}" not found.`, agentMemory: undefined });
+  }
+
+  const strategy = pieceMeta.triggers[triggerName].type;
+  onLog({ timestamp: Date.now(), type: 'phase', role: 'coordinator', message: `Planning trigger "${triggerName}" (strategy: ${strategy})...`, detail: 'planning' });
+  if (strategy && strategy !== 'POLLING') {
+    onLog({ timestamp: Date.now(), type: 'thinking', role: 'coordinator', message: `Note: "${strategy}" triggers are not fully automatable yet (Phase A handles POLLING). Producing a best-effort plan.` });
+  }
+
+  onLog({ timestamp: Date.now(), type: 'worker_spawn', role: 'coordinator', message: 'Spawning trigger planner worker...' });
+
+  let plan: TestPlanResult;
+  try {
+    plan = await runTriggerPlannerWorker({
+      pieceMeta,
+      triggerName,
+      previousMemory: previousMemory || undefined,
+      onLog,
+      abortSignal,
+      costTracker,
+    });
+  } catch (err: any) {
+    if (err.message?.includes('aborted')) throw err;
+    onLog({ timestamp: Date.now(), type: 'error', role: 'coordinator', message: `Trigger planner failed: ${err.message}` });
+    return withCost({ steps: [], note: `Trigger plan creation failed: ${err.message}`, agentMemory: undefined });
+  }
+
+  if (plan.steps.length === 0) {
+    onLog({ timestamp: Date.now(), type: 'error', role: 'coordinator', message: 'Trigger planner produced an empty plan.' });
+    return withCost(plan);
+  }
+
+  const validation = validateTriggerPlanDeterministically(triggerName, plan.steps);
+  if (!validation.ok) {
+    for (const issue of validation.issues) {
+      onLog({ timestamp: Date.now(), type: 'error', role: 'coordinator', message: issue });
+    }
+  }
+
+  onLog({ timestamp: Date.now(), type: 'worker_complete', role: 'coordinator', message: `Trigger planner created a ${plan.steps.length}-step plan.` });
+  return withCost(plan);
 }

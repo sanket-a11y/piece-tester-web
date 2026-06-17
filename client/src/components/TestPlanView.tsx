@@ -19,6 +19,7 @@ const STEP_TYPE_CONFIG: Record<string, { label: string; color: string; bg: strin
   verify:      { label: 'Verify',      color: 'text-cyan-400',   bg: 'bg-cyan-500/10',   border: 'border-cyan-500/30' },
   cleanup:     { label: 'Cleanup',     color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' },
   human_input: { label: 'Human Input', color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30' },
+  trigger_test:{ label: 'Trigger',     color: 'text-green-400',  bg: 'bg-green-500/10',  border: 'border-green-500/30' },
 };
 
 const STEP_STATUS_ICON: Record<string, JSX.Element> = {
@@ -36,17 +37,23 @@ const STEP_STATUS_ICON: Record<string, JSX.Element> = {
 
 interface TestPlanViewProps {
   pieceName: string;
+  /** The target name. For triggers this holds the trigger name. */
   actionName: string;
   actionDisplayName: string;
   hasAnthropicKey: boolean;
+  /** 'action' (default) or 'trigger'. Triggers use the v2 trigger planner and have no v1/fix path. */
+  targetKind?: 'action' | 'trigger';
   onClose?: () => void;
   /** Notify parent when plan is created/updated/deleted */
   onPlanChange?: (plan: TestPlan | null) => void;
 }
 
 export default function TestPlanView({
-  pieceName, actionName, actionDisplayName, hasAnthropicKey, onClose, onPlanChange,
+  pieceName, actionName, actionDisplayName, hasAnthropicKey, targetKind = 'action', onClose, onPlanChange,
 }: TestPlanViewProps) {
+  const isTrigger = targetKind === 'trigger';
+  // Background job key used by the server (v2 trigger jobs are namespaced).
+  const jobKey = isTrigger ? `v2:trigger:${actionName}` : `v2:${actionName}`;
   const [plan, setPlan] = useState<TestPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -99,7 +106,9 @@ export default function TestPlanView({
     let cancelled = false;
     (async () => {
       try {
-        const existing = await api.getTestPlanByAction(pieceName, actionName);
+        const existing = isTrigger
+          ? await api.getTestPlanByTrigger(pieceName, actionName)
+          : await api.getTestPlanByAction(pieceName, actionName);
         if (!cancelled) { setPlan(existing); setEditedSteps(existing.steps); }
       } catch {
         // No plan exists yet
@@ -114,7 +123,7 @@ export default function TestPlanView({
       try {
         const jobs = await api.getAiPlanJobs(pieceName);
         if (cancelled) return;
-        const activeJob = jobs[`v2:${actionName}`] || jobs[actionName];
+        const activeJob = isTrigger ? jobs[jobKey] : (jobs[`v2:${actionName}`] || jobs[actionName]);
         if (activeJob && activeJob.status === 'running') {
           setCreating(true);
           setShowLogs(true);
@@ -131,6 +140,7 @@ export default function TestPlanView({
                 id: result.planId,
                 piece_name: pieceName,
                 target_action: actionName,
+                target_type: targetKind,
                 steps: result.steps,
                 status: result.status as 'draft' | 'approved',
                 agent_memory: result.agentMemory || '',
@@ -150,7 +160,9 @@ export default function TestPlanView({
             onDone: () => { if (!cancelled) { setCreating(false); refreshLessons(); } },
           };
 
-          controllerRef.current = jobs[`v2:${actionName}`]
+          controllerRef.current = isTrigger
+            ? api.streamTriggerPlanV2(pieceName, actionName, callbacks, plan?.agent_memory || undefined)
+            : jobs[`v2:${actionName}`]
             ? api.streamAiPlanV2(pieceName, actionName, callbacks, plan?.agent_memory || undefined)
             : api.subscribeAiPlanJob(pieceName, actionName, callbacks);
         }
@@ -188,6 +200,7 @@ export default function TestPlanView({
           id: result.planId,
           piece_name: pieceName,
           target_action: actionName,
+          target_type: targetKind,
           steps: result.steps,
           status: result.status as 'draft' | 'approved',
           agent_memory: result.agentMemory || '',
@@ -209,10 +222,12 @@ export default function TestPlanView({
       onDone: () => { setCreating(false); refreshLessons(); },
     };
 
-    controllerRef.current = useV2
+    controllerRef.current = isTrigger
+      ? api.streamTriggerPlanV2(pieceName, actionName, callbacks, memory)
+      : useV2
       ? api.streamAiPlanV2(pieceName, actionName, callbacks, memory)
       : api.streamAiPlan(pieceName, actionName, callbacks, memory);
-  }, [pieceName, actionName, plan, useV2]);
+  }, [pieceName, actionName, plan, useV2, isTrigger, targetKind]);
 
   // ── Execute plan ──
   const runPlan = useCallback(() => {
@@ -395,6 +410,7 @@ export default function TestPlanView({
 
   // ── Fix plan with AI after failure ──
   const fixPlan = useCallback(() => {
+    if (isTrigger) return; // No AI fixer for trigger plans yet (Phase A).
     if (!plan || stepResults.length === 0) return;
     controllerRef.current?.abort();
     setFixing(true);
@@ -432,12 +448,15 @@ export default function TestPlanView({
   const stopPlanAi = useCallback(() => {
     controllerRef.current?.abort();
     if (creating) {
-      void api.cancelAiPlanJob(pieceName, actionName, useV2).catch(() => {});
+      const cancel = isTrigger
+        ? api.cancelTriggerPlanV2Job(pieceName, actionName)
+        : api.cancelAiPlanJob(pieceName, actionName, useV2);
+      void cancel.catch(() => {});
     }
     setCreating(false);
     setFixing(false);
     setAgentLogs(prev => [...prev, { timestamp: Date.now(), type: 'error', message: 'AI stopped.' }]);
-  }, [pieceName, actionName, useV2, creating]);
+  }, [pieceName, actionName, useV2, creating, isTrigger]);
 
   // Cleanup on unmount
   useEffect(() => () => { controllerRef.current?.abort(); }, []);
@@ -578,25 +597,27 @@ export default function TestPlanView({
       {!plan && !creating && (
         <div className="text-center py-8 border border-dashed border-gray-700 rounded-lg">
           <Brain size={32} className="mx-auto mb-3 text-gray-600" />
-          <p className="text-gray-400 text-sm mb-3">No test plan exists for this action yet.</p>
+          <p className="text-gray-400 text-sm mb-3">No test plan exists for this {isTrigger ? 'trigger' : 'action'} yet.</p>
           {hasAnthropicKey ? (
             <div className="flex flex-col items-center gap-3">
               <button onClick={createPlan}
                 className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded flex items-center gap-2">
                 <Brain size={14} /> Create Plan with AI
               </button>
-              <button
-                onClick={() => setUseV2(!useV2)}
-                className={`text-xs px-2 py-1 rounded flex items-center gap-1.5 transition-colors ${
-                  useV2
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                    : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-400'
-                }`}
-                title={useV2 ? 'v2: Multi-agent (research → plan → verify)' : 'v1: Single agent loop'}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${useV2 ? 'bg-purple-400' : 'bg-gray-600'}`} />
-                {useV2 ? 'v2 Multi-Agent' : 'v1 Classic'}
-              </button>
+              {!isTrigger && (
+                <button
+                  onClick={() => setUseV2(!useV2)}
+                  className={`text-xs px-2 py-1 rounded flex items-center gap-1.5 transition-colors ${
+                    useV2
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                      : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-400'
+                  }`}
+                  title={useV2 ? 'v2: Multi-agent (research → plan → verify)' : 'v1: Single agent loop'}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${useV2 ? 'bg-purple-400' : 'bg-gray-600'}`} />
+                  {useV2 ? 'v2 Multi-Agent' : 'v1 Classic'}
+                </button>
+              )}
             </div>
           ) : (
             <p className="text-yellow-500 text-xs">Configure Anthropic API key in Settings first.</p>
@@ -967,18 +988,20 @@ export default function TestPlanView({
                 className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-sm rounded flex items-center gap-2 text-gray-400">
                 <RotateCcw size={14} /> Regenerate
               </button>
-              <button
-                onClick={() => setUseV2(!useV2)}
-                className={`px-2 py-2 text-xs rounded flex items-center gap-1.5 transition-colors ${
-                  useV2
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                    : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-400'
-                }`}
-                title={useV2 ? 'v2: Multi-agent system (research → plan → verify)' : 'v1: Single agent loop'}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${useV2 ? 'bg-purple-400' : 'bg-gray-600'}`} />
-                {useV2 ? 'v2' : 'v1'}
-              </button>
+              {!isTrigger && (
+                <button
+                  onClick={() => setUseV2(!useV2)}
+                  className={`px-2 py-2 text-xs rounded flex items-center gap-1.5 transition-colors ${
+                    useV2
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                      : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-400'
+                  }`}
+                  title={useV2 ? 'v2: Multi-agent system (research → plan → verify)' : 'v1: Single agent loop'}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${useV2 ? 'bg-purple-400' : 'bg-gray-600'}`} />
+                  {useV2 ? 'v2' : 'v1'}
+                </button>
+              )}
             </>
           ) : executing ? (
             <div className="flex items-center gap-2 text-sm text-blue-400">
@@ -1027,8 +1050,8 @@ export default function TestPlanView({
                   : <><XCircle size={16} /> Plan execution failed</>}
               </div>
 
-              {/* Fix with AI button */}
-              {hasFailed && hasAnthropicKey && !fixing && (
+              {/* Fix with AI button (not available for trigger plans yet) */}
+              {hasFailed && hasAnthropicKey && !fixing && !isTrigger && (
                 <button onClick={fixPlan}
                   className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs rounded flex items-center gap-1.5 font-medium">
                   <Wrench size={12} /> Fix with AI
