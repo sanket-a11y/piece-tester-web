@@ -25,7 +25,7 @@ export const setPlanTool: ToolDefinition = {
             input: { type: 'object' as const, description: 'Static input values for this step. Auth is added automatically.', additionalProperties: true },
             inputMapping: {
               type: 'object' as const,
-              description: 'Dynamic input references. Maps field names to "${steps.<stepId>.output.<path>}" expressions.',
+              description: 'Dynamic input references. Maps field names to "${steps.<stepId>.output.<path>}" expressions. To reference a human_input step\'s answer, use "${steps.<stepId>.output.value}" (a human_input step outputs { value: <the user answer> }).',
               additionalProperties: { type: 'string' },
             },
             requiresApproval: { type: 'boolean', description: 'AVOID using this. Plans run unattended on schedules.' },

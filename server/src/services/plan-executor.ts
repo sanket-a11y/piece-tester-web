@@ -12,6 +12,22 @@ import { executeActionOnAP, type TestPlanStep } from './ai-config-generator.js';
 import { createClient } from './test-engine.js';
 import type { PieceMetadataFull } from './ap-client.js';
 
+// ── Logging helpers ──
+// All plan execution narration goes to the terminal under a [plan] prefix so a
+// `pm2 logs` / `npm run dev` tail shows exactly what each run is doing.
+
+function plog(msg: string) { console.log(`[plan] ${msg}`); }
+function perr(msg: string) { console.error(`[plan] ${msg}`); }
+
+/** Compact one-line preview of a value for logs (truncated). */
+function preview(val: unknown, max = 300): string {
+  let s: string;
+  try { s = typeof val === 'string' ? val : JSON.stringify(val); }
+  catch { s = String(val); }
+  if (s == null) return String(val);
+  return s.length > max ? s.slice(0, max) + `… (+${s.length - max} chars)` : s;
+}
+
 // ── Types ──
 
 export interface StepResult {
@@ -150,6 +166,9 @@ export async function executePlan(
   const runId = run.id;
   const emitter = getResumeEmitter(runId);
 
+  plog(`▶ Run #${runId} — plan #${planId} "${plan.target_action}" [${plan.piece_name}] · ${steps.length} steps · trigger=${triggerType}`);
+  steps.forEach((s, i) => plog(`   ${i + 1}. [${s.type}] ${s.label}${s.actionName ? ` → ${s.actionName}` : ''}`));
+
   const stepResults = new Map<string, StepResult>();
   const resultsArray: StepResult[] = [];
 
@@ -176,6 +195,7 @@ export async function executePlan(
     for (const step of steps) {
       // Check for abort before each step
       if (signal?.aborted) {
+        perr(`■ Run #${runId} CANCELLED by user`);
         // Mark this step and all remaining as skipped
         for (const s of steps) {
           const r = stepResults.get(s.id)!;
@@ -209,9 +229,13 @@ export async function executePlan(
       if (step.type === 'human_input') {
         // Check for saved response (from previous runs) -- skip pause if available
         if (step.savedHumanResponse) {
+          plog(`• [human_input] "${step.label}" → using saved response: ${preview(step.savedHumanResponse, 120)}`);
           sr.status = 'completed';
           sr.humanResponse = step.savedHumanResponse;
-          sr.output = { humanResponse: step.savedHumanResponse };
+          // Expose the answer under both `value` and `humanResponse` so inputMapping
+          // references resolve regardless of which path the planner emitted
+          // (e.g. ${steps.s.output.value} or ${steps.s.output.humanResponse}).
+          sr.output = { value: step.savedHumanResponse, humanResponse: step.savedHumanResponse };
           saveResults();
 
           onProgress({
@@ -225,6 +249,7 @@ export async function executePlan(
           continue;
         }
 
+        plog(`• [human_input] "${step.label}" → ⏸ paused, waiting for user: ${preview(step.humanPrompt || step.label, 120)}`);
         sr.status = 'waiting';
         saveResults();
 
@@ -244,9 +269,12 @@ export async function executePlan(
         // Wait for resume signal
         const response = await waitForResume(emitter, step.id);
 
+        plog(`• [human_input] "${step.label}" → ▶ resumed with: ${preview(response.humanResponse, 120)}`);
         sr.status = 'completed';
         sr.humanResponse = response.humanResponse;
-        sr.output = { humanResponse: response.humanResponse };
+        // Expose the answer under both `value` and `humanResponse` so inputMapping
+        // references resolve regardless of which path the planner emitted.
+        sr.output = { value: response.humanResponse, humanResponse: response.humanResponse };
         saveResults();
 
         onProgress({
@@ -263,6 +291,7 @@ export async function executePlan(
       // Scheduled and auto-test runs bypass approval automatically — no one is watching.
       const isUnattended = triggerType === 'scheduled' || triggerType === 'auto_test';
       if (step.requiresApproval && !isUnattended) {
+        plog(`• [${step.type}] "${step.label}" → ⏸ paused, waiting for approval`);
         sr.status = 'waiting';
         saveResults();
 
@@ -282,6 +311,7 @@ export async function executePlan(
         const response = await waitForResume(emitter, step.id);
 
         if (!response.approved) {
+          plog(`• [${step.type}] "${step.label}" → ✗ user declined, skipping`);
           sr.status = 'skipped';
           sr.error = 'User declined';
           saveResults();
@@ -317,6 +347,9 @@ export async function executePlan(
         // Resolve inputMapping
         const resolvedInput = resolveInputMapping(step, stepResults);
 
+        plog(`• [${step.type}] "${step.label}" → executing ${step.actionName}`);
+        plog(`    input: ${preview(resolvedInput)}`);
+
         // Execute the action
         const output = await executeActionOnAP(pieceMeta, step.actionName, resolvedInput);
 
@@ -324,6 +357,8 @@ export async function executePlan(
         sr.output = output;
         sr.duration_ms = Date.now() - startMs;
         saveResults();
+
+        plog(`• [${step.type}] "${step.label}" → ✓ completed in ${sr.duration_ms}ms · output: ${preview(output)}`);
 
         onProgress({
           type: 'step_complete',
@@ -338,6 +373,9 @@ export async function executePlan(
         sr.error = err.message || 'Unknown error';
         sr.duration_ms = Date.now() - startMs;
         saveResults();
+
+        perr(`• [${step.type}] "${step.label}" → ✗ FAILED after ${sr.duration_ms}ms`);
+        perr(`    error: ${sr.error}`);
 
         onProgress({
           type: 'step_failed',
@@ -358,18 +396,27 @@ export async function executePlan(
               // Run cleanup step
               futureSr.status = 'running';
               saveResults();
+              const cleanupStart = Date.now();
               try {
                 const cleanupInput = resolveInputMapping(futureStep, stepResults);
+                plog(`• [cleanup] "${futureStep.label}" → executing ${futureStep.actionName}`);
+                plog(`    input: ${preview(cleanupInput)}`);
                 const cleanupOutput = await executeActionOnAP(pieceMeta, futureStep.actionName, cleanupInput);
                 futureSr.status = 'completed';
                 futureSr.output = cleanupOutput;
-              } catch {
+                futureSr.duration_ms = Date.now() - cleanupStart;
+                plog(`• [cleanup] "${futureStep.label}" → ✓ completed in ${futureSr.duration_ms}ms`);
+              } catch (cleanupErr: any) {
                 futureSr.status = 'failed';
-                futureSr.error = 'Cleanup failed';
+                // Surface the real reason instead of a generic "Cleanup failed".
+                futureSr.error = `Cleanup failed: ${cleanupErr?.message || 'Unknown error'}`;
+                futureSr.duration_ms = Date.now() - cleanupStart;
+                perr(`• [cleanup] "${futureStep.label}" → ✗ FAILED after ${futureSr.duration_ms}ms`);
+                perr(`    error: ${futureSr.error}`);
               }
-              futureSr.duration_ms = Date.now() - startMs;
               saveResults();
             } else {
+              plog(`• [${futureStep.type}] "${futureStep.label}" → ⊘ skipped (a prior step failed)`);
               futureSr.status = 'skipped';
               saveResults();
             }
@@ -381,6 +428,8 @@ export async function executePlan(
             completed_at: new Date().toISOString(),
             step_results: JSON.stringify(steps.map(s => stepResults.get(s.id)!)),
           });
+
+          perr(`■ Run #${runId} FAILED — step "${step.label}" failed: ${sr.error}`);
 
           onProgress({
             type: 'plan_failed',
@@ -403,6 +452,8 @@ export async function executePlan(
       step_results: JSON.stringify(steps.map(s => stepResults.get(s.id)!)),
     });
 
+    plog(`■ Run #${runId} ✓ COMPLETED — all ${steps.length} steps passed`);
+
     onProgress({
       type: 'plan_complete',
       runId,
@@ -410,6 +461,9 @@ export async function executePlan(
     });
 
   } catch (err: any) {
+    perr(`■ Run #${runId} ERRORED — ${err.message || 'Unknown error'}`);
+    if (err?.stack) perr(err.stack);
+
     updatePlanRun(runId, {
       status: 'failed',
       completed_at: new Date().toISOString(),

@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import axios from 'axios';
 import { getSettings, getConnectionByPiece } from '../db/queries.js';
-import type { PieceMetadataFull, PieceActionMeta } from './ap-client.js';
+import { ActivepiecesClient, type PieceMetadataFull, type PieceActionMeta } from './ap-client.js';
 import { createClient } from './test-engine.js';
 import { buildConnectionValue, makeExternalId } from './connection-builder.js';
 import { formatLessonsForPrompt } from './lesson-extractor.js';
@@ -485,41 +485,47 @@ export async function executeActionOnAP(pieceMeta: PieceMetadataFull, actionName
   const apClient = createClient();
   const connRow = getConnectionByPiece(pieceMeta.name);
   const authInput: Record<string, unknown> = {};
+  const tag = `[execute-action] ${pieceMeta.name}.${actionName}`;
+  let flow: Awaited<ReturnType<typeof apClient.createFlow>> | undefined;
 
-  if (connRow) {
-    const connValue = JSON.parse(connRow.connection_value);
-    if (connValue._imported) {
-      const remoteConns = await apClient.listConnections();
-      const remote = remoteConns.find(rc => rc.id === connValue.remote_id || rc.externalId === connValue.remote_id);
-      if (remote) authInput['auth'] = `{{connections.${remote.externalId}}}`;
-      else throw new Error('Imported connection not found in AP. Re-import it.');
-    } else if (connRow.connection_type !== 'NO_AUTH') {
-      const extId = makeExternalId(pieceMeta.name);
-      await apClient.upsertConnection({
-        externalId: extId, displayName: `AI Agent - ${pieceMeta.displayName}`,
-        pieceName: pieceMeta.name, type: connRow.connection_type,
-        value: buildConnectionValue(connRow.connection_type as any, connValue),
-      });
-      authInput['auth'] = `{{connections.${extId}}}`;
-    }
-  }
-
-  // If no local connection found but the agent provided an auth externalId (from ap_list_connections),
-  // wrap it in the correct {{connections.}} format so AP resolves it at runtime.
-  // Always strip the raw auth value from input so it doesn't override authInput.
-  const { auth: rawInputAuth, ...inputWithoutAuth } = input;
-  if (Object.keys(authInput).length === 0 && rawInputAuth && typeof rawInputAuth === 'string') {
-    // Accept bare externalId or already-formatted {{connections.xxx}}
-    if (rawInputAuth.startsWith('{{connections.')) {
-      authInput['auth'] = rawInputAuth;
-    } else if (!rawInputAuth.includes('{') && !rawInputAuth.includes(' ')) {
-      // Looks like a bare externalId — wrap it
-      authInput['auth'] = `{{connections.${rawInputAuth}}}`;
-    }
-  }
-
-  const flow = await apClient.createFlow(`[AI Agent] ${pieceMeta.displayName} - ${actionName}`);
   try {
+    if (connRow) {
+      const connValue = JSON.parse(connRow.connection_value);
+      if (connValue._imported) {
+        const remoteConns = await apClient.listConnections();
+        const remote = remoteConns.find(rc => rc.id === connValue.remote_id || rc.externalId === connValue.remote_id);
+        if (remote) authInput['auth'] = `{{connections.${remote.externalId}}}`;
+        else throw new Error('Imported connection not found in AP. Re-import it.');
+      } else if (connRow.connection_type !== 'NO_AUTH') {
+        const extId = makeExternalId(pieceMeta.name);
+        console.log(`${tag} — upserting ${connRow.connection_type} connection "${extId}"`);
+        await apClient.upsertConnection({
+          externalId: extId, displayName: `AI Agent - ${pieceMeta.displayName}`,
+          pieceName: pieceMeta.name, type: connRow.connection_type,
+          value: buildConnectionValue(connRow.connection_type as any, connValue),
+        });
+        authInput['auth'] = `{{connections.${extId}}}`;
+      }
+    }
+
+    // If no local connection found but the agent provided an auth externalId (from ap_list_connections),
+    // wrap it in the correct {{connections.}} format so AP resolves it at runtime.
+    // Always strip the raw auth value from input so it doesn't override authInput.
+    const { auth: rawInputAuth, ...inputWithoutAuth } = input;
+    if (Object.keys(authInput).length === 0 && rawInputAuth && typeof rawInputAuth === 'string') {
+      // Accept bare externalId or already-formatted {{connections.xxx}}
+      if (rawInputAuth.startsWith('{{connections.')) {
+        authInput['auth'] = rawInputAuth;
+      } else if (!rawInputAuth.includes('{') && !rawInputAuth.includes(' ')) {
+        // Looks like a bare externalId — wrap it
+        authInput['auth'] = `{{connections.${rawInputAuth}}}`;
+      }
+    }
+
+    console.log(`${tag} — creating temporary test flow`);
+    flow = await apClient.createFlow(`[AI Agent] ${pieceMeta.displayName} - ${actionName}`);
+
+    console.log(`${tag} — adding action step to flow ${flow.id}`);
     const updatedFlow = await apClient.applyFlowOperation(flow.id, {
       type: 'ADD_ACTION',
       request: {
@@ -538,20 +544,35 @@ export async function executeActionOnAP(pieceMeta: PieceMetadataFull, actionName
 
     if (!apClient.hasJwtToken()) throw new Error('JWT token required. Sign in via Settings first.');
 
+    console.log(`${tag} — running test-step (JWT) on flow version ${updatedFlow.version.id}`);
     const flowRun = await apClient.testStep(updatedFlow.version.id, 'step_1');
+    console.log(`${tag} — flow run ${flowRun.id} started; polling up to 90s for terminal status`);
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       const run = await apClient.getFlowRun(flowRun.id);
       if (['SUCCEEDED', 'FAILED', 'INTERNAL_ERROR', 'TIMEOUT'].includes(run.status)) {
         const stepResult = run.steps?.['step_1'] as any;
-        if (run.status === 'SUCCEEDED') return stepResult?.output ?? { status: 'success' };
+        if (run.status === 'SUCCEEDED') {
+          console.log(`${tag} — flow run ${flowRun.id} ✓ SUCCEEDED`);
+          return stepResult?.output ?? { status: 'success' };
+        }
+        // The piece itself failed (e.g. a 4xx from the upstream API). Surface the
+        // piece's own errorMessage — this is the most useful signal for debugging.
+        console.error(`${tag} — flow run ${flowRun.id} ✗ ${run.status}: ${stepResult?.errorMessage || 'Unknown error'}`);
         throw new Error(JSON.stringify({ status: run.status, errorMessage: stepResult?.errorMessage || 'Unknown error', output: stepResult?.output }));
       }
       await new Promise(r => setTimeout(r, 2500));
     }
     throw new Error('Timed out after 90s');
+  } catch (err) {
+    // Convert axios errors into a readable "HTTP <status>: <body>" string so the
+    // real reason (e.g. a 403 from AP's test-step endpoint) is visible in logs and
+    // in the stored step error — not the opaque "Request failed with status code 403".
+    const msg = ActivepiecesClient.formatError(err);
+    console.error(`${tag} — ✗ FAILED: ${msg}`);
+    throw new Error(msg);
   } finally {
-    await apClient.deleteFlowSafely(flow.id, 5, `ai-agent:${actionName}`);
+    if (flow) await apClient.deleteFlowSafely(flow.id, 5, `ai-agent:${actionName}`);
   }
 }
 

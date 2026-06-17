@@ -112,6 +112,11 @@ Example for "Add reaction to message":
   - input: { "reaction": "thumbsup" }
   - inputMapping: { "messageTimestamp": "\${steps.step_1.output.ts}", "channel": "\${steps.step_1.output.channel}" }
 
+Referencing a human_input step: a human_input step outputs { "value": <the user's answer> }.
+Reference it as \${steps.<stepId>.output.value} -- NOT .output.id, .output.text, or any other key.
+- Step 1 (human_input): "Get Team ID" -> outputs { "value": "<team uuid>" }
+- Step 2 (test): create_issue with inputMapping: { "team_id": "\${steps.step_1.output.value}" }
+
 The executor resolves inputMapping at runtime, so step 2 always gets the FRESH value from step 1.`;
 
 /** Rule against custom HTTP actions. */
