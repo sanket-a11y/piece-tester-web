@@ -62,6 +62,10 @@ export default function TestPlanView({
   const [showLogs, setShowLogs] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [editedSteps, setEditedSteps] = useState<TestPlanStep[]>([]);
+  // Raw text buffers for the input JSON editor, keyed by step id, so typing
+  // invalid-intermediate JSON doesn't get reset out from under the cursor.
+  const [inputDrafts, setInputDrafts] = useState<Record<string, string>>({});
+  const [inputErrors, setInputErrors] = useState<Record<string, boolean>>({});
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
 
   // Execution state
@@ -306,11 +310,18 @@ export default function TestPlanView({
       const updated = await api.updateTestPlan(plan.id, { steps: editedSteps });
       setPlan(updated);
       setEditMode(false);
+      setInputDrafts({});
+      setInputErrors({});
       onPlanChange?.(updated);
     } catch (err: any) {
       console.error('Failed to save plan:', err);
     }
   }, [plan, editedSteps, onPlanChange]);
+
+  // Update a single field on a step being edited.
+  const patchStep = useCallback((stepId: string, patch: Partial<TestPlanStep>) => {
+    setEditedSteps(prev => prev.map(s => s.id === stepId ? { ...s, ...patch } : s));
+  }, []);
 
   // ── Approve plan ──
   const approvePlan = useCallback(async () => {
@@ -490,7 +501,7 @@ export default function TestPlanView({
         <div className="flex items-center gap-2">
           {plan && !editMode && !executing && (
             <>
-              <button onClick={() => { setEditMode(true); setEditedSteps(plan.steps); }}
+              <button onClick={() => { setEditMode(true); setEditedSteps(plan.steps); setInputDrafts({}); setInputErrors({}); }}
                 className="text-xs text-gray-400 hover:text-gray-200 px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 flex items-center gap-1">
                 <Edit3 size={10} /> Edit
               </button>
@@ -506,7 +517,7 @@ export default function TestPlanView({
                 className="text-xs text-green-400 hover:text-green-300 px-2 py-1 rounded bg-green-500/10 hover:bg-green-500/20 flex items-center gap-1">
                 <Save size={10} /> Save
               </button>
-              <button onClick={() => { setEditMode(false); setEditedSteps(plan?.steps || []); }}
+              <button onClick={() => { setEditMode(false); setEditedSteps(plan?.steps || []); setInputDrafts({}); setInputErrors({}); }}
                 className="text-xs text-gray-400 hover:text-gray-300 px-2 py-1 rounded bg-gray-800 hover:bg-gray-700">
                 Cancel
               </button>
@@ -687,30 +698,81 @@ export default function TestPlanView({
                 {/* Expanded detail */}
                 {isExpanded && (
                   <div className="px-3 pb-3 pt-1 text-xs space-y-2 border-t border-gray-800/50">
-                    {step.description && <p className="text-gray-400">{step.description}</p>}
+                    {/* Label (editable) */}
+                    {editMode ? (
+                      <div>
+                        <span className="text-gray-500 font-medium">Label:</span>
+                        <input
+                          className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200"
+                          value={step.label}
+                          onChange={(e) => patchStep(step.id, { label: e.target.value })}
+                        />
+                      </div>
+                    ) : (
+                      step.description && <p className="text-gray-400">{step.description}</p>
+                    )}
 
-                    {step.actionName && (
-                      <div className="text-gray-500">
-                        <span className="font-medium">Action:</span> <code className="text-gray-300">{step.actionName}</code>
+                    {/* Description (editable) */}
+                    {editMode && (
+                      <div>
+                        <span className="text-gray-500 font-medium">Description:</span>
+                        <textarea
+                          className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 resize-y"
+                          rows={2}
+                          value={step.description}
+                          onChange={(e) => patchStep(step.id, { description: e.target.value })}
+                        />
                       </div>
                     )}
 
-                    {/* Static input */}
-                    {Object.keys(step.input).length > 0 && (
+                    {/* Action / trigger target */}
+                    {step.kind === 'trigger' ? (
+                      <div className="text-gray-500">
+                        <span className="font-medium">Trigger:</span>{' '}
+                        <code className="text-gray-300">{step.triggerName || step.actionName}</code>
+                        {step.triggerStrategy && <span className="text-gray-600 ml-1">({step.triggerStrategy})</span>}
+                      </div>
+                    ) : step.actionName ? (
+                      editMode ? (
+                        <div>
+                          <span className="text-gray-500 font-medium">Action:</span>
+                          <input
+                            className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono text-gray-200"
+                            value={step.actionName}
+                            onChange={(e) => patchStep(step.id, { actionName: e.target.value })}
+                          />
+                        </div>
+                      ) : (
+                        <div className="text-gray-500">
+                          <span className="font-medium">Action:</span> <code className="text-gray-300">{step.actionName}</code>
+                        </div>
+                      )
+                    ) : null}
+
+                    {/* Static input — always editable in edit mode (even when empty) */}
+                    {(editMode || Object.keys(step.input).length > 0) && (
                       <div>
                         <span className="text-gray-500 font-medium">Input:</span>
                         {editMode ? (
-                          <textarea
-                            className="w-full mt-1 bg-gray-800 border border-gray-700 rounded p-2 text-xs font-mono text-gray-300 resize-y"
-                            rows={3}
-                            value={JSON.stringify(step.input, null, 2)}
-                            onChange={(e) => {
-                              try {
-                                const parsed = JSON.parse(e.target.value);
-                                setEditedSteps(prev => prev.map(s => s.id === step.id ? { ...s, input: parsed } : s));
-                              } catch { /* ignore invalid JSON while typing */ }
-                            }}
-                          />
+                          <>
+                            <textarea
+                              className={`w-full mt-1 bg-gray-800 border rounded p-2 text-xs font-mono text-gray-300 resize-y ${inputErrors[step.id] ? 'border-red-500/60' : 'border-gray-700'}`}
+                              rows={4}
+                              value={inputDrafts[step.id] ?? JSON.stringify(step.input, null, 2)}
+                              onChange={(e) => {
+                                const text = e.target.value;
+                                setInputDrafts(prev => ({ ...prev, [step.id]: text }));
+                                try {
+                                  const parsed = JSON.parse(text);
+                                  patchStep(step.id, { input: parsed });
+                                  setInputErrors(prev => ({ ...prev, [step.id]: false }));
+                                } catch {
+                                  setInputErrors(prev => ({ ...prev, [step.id]: true }));
+                                }
+                              }}
+                            />
+                            {inputErrors[step.id] && <span className="text-[10px] text-red-400">Invalid JSON — last valid value will be kept.</span>}
+                          </>
                         ) : (
                           <pre className="mt-1 bg-gray-800/50 rounded p-2 overflow-x-auto text-gray-300 font-mono">
                             {JSON.stringify(step.input, null, 2)}
@@ -719,26 +781,70 @@ export default function TestPlanView({
                       </div>
                     )}
 
-                    {/* Input mapping */}
-                    {(() => {
-                      const mapping = step.inputMapping || {};
-                      const entries = Object.entries(mapping);
-                      if (entries.length === 0) return null;
-                      return (
-                        <div>
-                          <span className="text-gray-500 font-medium">Dynamic mapping:</span>
-                          <div className="mt-1 space-y-0.5">
-                            {entries.map(([field, expr]) => (
-                              <div key={field} className="flex items-center gap-2 text-gray-400">
-                                <code className="text-cyan-400">{field}</code>
-                                <span className="text-gray-600">&larr;</span>
-                                <code className="text-purple-400">{expr}</code>
-                              </div>
-                            ))}
-                          </div>
+                    {/* Input mapping — editable field→expression rows in edit mode */}
+                    {editMode ? (
+                      <div>
+                        <span className="text-gray-500 font-medium">Dynamic mapping</span>
+                        <span className="text-gray-600 ml-1">(field ← ${'{steps.<id>.output.<path>}'})</span>
+                        <div className="mt-1 space-y-1">
+                          {Object.entries(step.inputMapping || {}).map(([field, expr], mi) => (
+                            <div key={mi} className="flex items-center gap-1.5">
+                              <input
+                                className="w-1/3 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] font-mono text-cyan-300"
+                                value={field}
+                                placeholder="field"
+                                onChange={(e) => {
+                                  const m = { ...(step.inputMapping || {}) };
+                                  const val = m[field];
+                                  delete m[field];
+                                  m[e.target.value] = val;
+                                  patchStep(step.id, { inputMapping: m });
+                                }}
+                              />
+                              <span className="text-gray-600">&larr;</span>
+                              <input
+                                className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] font-mono text-purple-300"
+                                value={expr}
+                                placeholder="${steps.step_1.output.id}"
+                                onChange={(e) => patchStep(step.id, { inputMapping: { ...(step.inputMapping || {}), [field]: e.target.value } })}
+                              />
+                              <button
+                                onClick={() => { const m = { ...(step.inputMapping || {}) }; delete m[field]; patchStep(step.id, { inputMapping: m }); }}
+                                className="text-red-400 hover:text-red-300"
+                                title="Remove mapping"
+                              >
+                                <Trash2 size={11} />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => patchStep(step.id, { inputMapping: { ...(step.inputMapping || {}), '': '' } })}
+                            className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
+                          >
+                            <Plus size={10} /> Add mapping
+                          </button>
                         </div>
-                      );
-                    })()}
+                      </div>
+                    ) : (
+                      (() => {
+                        const entries = Object.entries(step.inputMapping || {});
+                        if (entries.length === 0) return null;
+                        return (
+                          <div>
+                            <span className="text-gray-500 font-medium">Dynamic mapping:</span>
+                            <div className="mt-1 space-y-0.5">
+                              {entries.map(([field, expr]) => (
+                                <div key={field} className="flex items-center gap-2 text-gray-400">
+                                  <code className="text-cyan-400">{field}</code>
+                                  <span className="text-gray-600">&larr;</span>
+                                  <code className="text-purple-400">{expr}</code>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()
+                    )}
 
                     {/* Human prompt (for human_input steps) */}
                     {step.type === 'human_input' && step.humanPrompt && (

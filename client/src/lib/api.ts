@@ -247,7 +247,7 @@ function streamAiFix(
 
 export interface TestPlanStep {
   id: string;
-  type: 'setup' | 'test' | 'verify' | 'cleanup' | 'human_input';
+  type: 'setup' | 'test' | 'verify' | 'cleanup' | 'human_input' | 'trigger_arm' | 'trigger_test';
   label: string;
   description: string;
   actionName: string;
@@ -257,6 +257,12 @@ export interface TestPlanStep {
   humanPrompt?: string;
   /** Saved human response for automatic reuse in future/scheduled runs */
   savedHumanResponse?: string;
+  /** Step kind: 'action' (default) or 'trigger'. */
+  kind?: 'action' | 'trigger';
+  /** For kind='trigger': the trigger name. */
+  triggerName?: string;
+  /** For kind='trigger': how to test it. */
+  triggerStrategy?: 'TEST_FUNCTION' | 'SIMULATION';
 }
 
 export interface TestPlan {

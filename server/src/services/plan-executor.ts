@@ -89,6 +89,24 @@ function resolveBuiltinTokens(input: Record<string, unknown>): Record<string, un
 
 // ── InputMapping resolver ──
 
+/**
+ * Set a value at a (possibly dotted) field path, creating intermediate objects.
+ * e.g. setDeep(obj, "variables.id", v) -> obj.variables = { ...obj.variables, id: v }.
+ * A plain key with no dots behaves like obj[field] = v.
+ */
+function setDeep(target: Record<string, unknown>, fieldPath: string, value: unknown): void {
+  const parts = fieldPath.split('.');
+  let cursor: Record<string, unknown> = target;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const key = parts[i];
+    if (cursor[key] === null || typeof cursor[key] !== 'object' || Array.isArray(cursor[key])) {
+      cursor[key] = {};
+    }
+    cursor = cursor[key] as Record<string, unknown>;
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
 function resolveInputMapping(
   step: TestPlanStep,
   previousResults: Map<string, StepResult>,
@@ -104,7 +122,7 @@ function resolveInputMapping(
     const match = expression.match(/^\$\{steps\.([^.]+)\.(.+)\}$/);
     if (!match) {
       // Not a valid expression, use as literal
-      resolved[fieldName] = expression;
+      setDeep(resolved, fieldName, expression);
       continue;
     }
 
@@ -124,7 +142,8 @@ function resolveInputMapping(
     }
 
     if (value !== undefined) {
-      resolved[fieldName] = value;
+      // fieldName may be a dotted path (e.g. "variables.id") -> set nested.
+      setDeep(resolved, fieldName, value);
     } else {
       console.warn(`[plan-executor] inputMapping: path "${pathStr}" resolved to undefined for step "${refStepId}"`);
     }

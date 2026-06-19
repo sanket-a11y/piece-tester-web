@@ -178,7 +178,13 @@ Example for "Add reaction to message":
   - input: { "reaction": "thumbsup" }
   - inputMapping: { "messageTimestamp": "\${steps.step_1.output.ts}", "channel": "\${steps.step_1.output.channel}" }
 
-The executor resolves inputMapping at runtime, so step 2 always gets the FRESH value from step 1.`;
+The executor resolves inputMapping at runtime, so step 2 always gets the FRESH value from step 1.
+
+NESTED FIELDS — use a dotted key to target a field INSIDE an object value:
+- To set { "variables": { "id": <ref> } }, map the key "variables.id", NOT "variables".
+- Example (GraphQL): input { "query": "mutation($id: String!){ issueDelete(id:$id){ success } }", "variables": {} }
+  inputMapping { "variables.id": "\${steps.step_1.output.issue.id}" }
+- Mapping the whole object key (e.g. "variables") to a single scalar id is WRONG — it sets variables to a string and the inner field stays missing.`;
 
 /** Rule against custom HTTP actions. */
 export const NO_CUSTOM_HTTP_RULE = `## CRITICAL: Never Use Custom HTTP/API Calls in Plans
