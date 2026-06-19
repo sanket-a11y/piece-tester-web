@@ -19,6 +19,8 @@ const STEP_TYPE_CONFIG: Record<string, { label: string; color: string; bg: strin
   verify:      { label: 'Verify',      color: 'text-cyan-400',   bg: 'bg-cyan-500/10',   border: 'border-cyan-500/30' },
   cleanup:     { label: 'Cleanup',     color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' },
   human_input: { label: 'Human Input', color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30' },
+  trigger_arm: { label: 'Arm Trigger', color: 'text-teal-400',   bg: 'bg-teal-500/10',   border: 'border-teal-500/30' },
+  trigger_test:{ label: 'Trigger',     color: 'text-green-400',  bg: 'bg-green-500/10',  border: 'border-green-500/30' },
 };
 
 const STEP_STATUS_ICON: Record<string, JSX.Element> = {
@@ -36,17 +38,23 @@ const STEP_STATUS_ICON: Record<string, JSX.Element> = {
 
 interface TestPlanViewProps {
   pieceName: string;
+  /** The target name. For triggers this holds the trigger name. */
   actionName: string;
   actionDisplayName: string;
   hasAnthropicKey: boolean;
+  /** 'action' (default) or 'trigger'. Triggers use the v2 trigger planner and have no v1/fix path. */
+  targetKind?: 'action' | 'trigger';
   onClose?: () => void;
   /** Notify parent when plan is created/updated/deleted */
   onPlanChange?: (plan: TestPlan | null) => void;
 }
 
 export default function TestPlanView({
-  pieceName, actionName, actionDisplayName, hasAnthropicKey, onClose, onPlanChange,
+  pieceName, actionName, actionDisplayName, hasAnthropicKey, targetKind = 'action', onClose, onPlanChange,
 }: TestPlanViewProps) {
+  const isTrigger = targetKind === 'trigger';
+  // Background job key used by the server (v2 trigger jobs are namespaced).
+  const jobKey = isTrigger ? `v2:trigger:${actionName}` : `v2:${actionName}`;
   const [plan, setPlan] = useState<TestPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -54,6 +62,10 @@ export default function TestPlanView({
   const [showLogs, setShowLogs] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [editedSteps, setEditedSteps] = useState<TestPlanStep[]>([]);
+  // Raw text buffers for the input JSON editor, keyed by step id, so typing
+  // invalid-intermediate JSON doesn't get reset out from under the cursor.
+  const [inputDrafts, setInputDrafts] = useState<Record<string, string>>({});
+  const [inputErrors, setInputErrors] = useState<Record<string, boolean>>({});
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
 
   // Execution state
@@ -99,7 +111,9 @@ export default function TestPlanView({
     let cancelled = false;
     (async () => {
       try {
-        const existing = await api.getTestPlanByAction(pieceName, actionName);
+        const existing = isTrigger
+          ? await api.getTestPlanByTrigger(pieceName, actionName)
+          : await api.getTestPlanByAction(pieceName, actionName);
         if (!cancelled) { setPlan(existing); setEditedSteps(existing.steps); }
       } catch {
         // No plan exists yet
@@ -114,7 +128,7 @@ export default function TestPlanView({
       try {
         const jobs = await api.getAiPlanJobs(pieceName);
         if (cancelled) return;
-        const activeJob = jobs[`v2:${actionName}`] || jobs[actionName];
+        const activeJob = isTrigger ? jobs[jobKey] : (jobs[`v2:${actionName}`] || jobs[actionName]);
         if (activeJob && activeJob.status === 'running') {
           setCreating(true);
           setShowLogs(true);
@@ -131,6 +145,7 @@ export default function TestPlanView({
                 id: result.planId,
                 piece_name: pieceName,
                 target_action: actionName,
+                target_type: targetKind,
                 steps: result.steps,
                 status: result.status as 'draft' | 'approved',
                 agent_memory: result.agentMemory || '',
@@ -150,7 +165,9 @@ export default function TestPlanView({
             onDone: () => { if (!cancelled) { setCreating(false); refreshLessons(); } },
           };
 
-          controllerRef.current = jobs[`v2:${actionName}`]
+          controllerRef.current = isTrigger
+            ? api.streamTriggerPlanV2(pieceName, actionName, callbacks, plan?.agent_memory || undefined)
+            : jobs[`v2:${actionName}`]
             ? api.streamAiPlanV2(pieceName, actionName, callbacks, plan?.agent_memory || undefined)
             : api.subscribeAiPlanJob(pieceName, actionName, callbacks);
         }
@@ -188,6 +205,7 @@ export default function TestPlanView({
           id: result.planId,
           piece_name: pieceName,
           target_action: actionName,
+          target_type: targetKind,
           steps: result.steps,
           status: result.status as 'draft' | 'approved',
           agent_memory: result.agentMemory || '',
@@ -209,10 +227,12 @@ export default function TestPlanView({
       onDone: () => { setCreating(false); refreshLessons(); },
     };
 
-    controllerRef.current = useV2
+    controllerRef.current = isTrigger
+      ? api.streamTriggerPlanV2(pieceName, actionName, callbacks, memory)
+      : useV2
       ? api.streamAiPlanV2(pieceName, actionName, callbacks, memory)
       : api.streamAiPlan(pieceName, actionName, callbacks, memory);
-  }, [pieceName, actionName, plan, useV2]);
+  }, [pieceName, actionName, plan, useV2, isTrigger, targetKind]);
 
   // ── Execute plan ──
   const runPlan = useCallback(() => {
@@ -290,11 +310,18 @@ export default function TestPlanView({
       const updated = await api.updateTestPlan(plan.id, { steps: editedSteps });
       setPlan(updated);
       setEditMode(false);
+      setInputDrafts({});
+      setInputErrors({});
       onPlanChange?.(updated);
     } catch (err: any) {
       console.error('Failed to save plan:', err);
     }
   }, [plan, editedSteps, onPlanChange]);
+
+  // Update a single field on a step being edited.
+  const patchStep = useCallback((stepId: string, patch: Partial<TestPlanStep>) => {
+    setEditedSteps(prev => prev.map(s => s.id === stepId ? { ...s, ...patch } : s));
+  }, []);
 
   // ── Approve plan ──
   const approvePlan = useCallback(async () => {
@@ -395,6 +422,7 @@ export default function TestPlanView({
 
   // ── Fix plan with AI after failure ──
   const fixPlan = useCallback(() => {
+    if (isTrigger) return; // No AI fixer for trigger plans yet (Phase A).
     if (!plan || stepResults.length === 0) return;
     controllerRef.current?.abort();
     setFixing(true);
@@ -432,12 +460,15 @@ export default function TestPlanView({
   const stopPlanAi = useCallback(() => {
     controllerRef.current?.abort();
     if (creating) {
-      void api.cancelAiPlanJob(pieceName, actionName, useV2).catch(() => {});
+      const cancel = isTrigger
+        ? api.cancelTriggerPlanV2Job(pieceName, actionName)
+        : api.cancelAiPlanJob(pieceName, actionName, useV2);
+      void cancel.catch(() => {});
     }
     setCreating(false);
     setFixing(false);
     setAgentLogs(prev => [...prev, { timestamp: Date.now(), type: 'error', message: 'AI stopped.' }]);
-  }, [pieceName, actionName, useV2, creating]);
+  }, [pieceName, actionName, useV2, creating, isTrigger]);
 
   // Cleanup on unmount
   useEffect(() => () => { controllerRef.current?.abort(); }, []);
@@ -470,7 +501,7 @@ export default function TestPlanView({
         <div className="flex items-center gap-2">
           {plan && !editMode && !executing && (
             <>
-              <button onClick={() => { setEditMode(true); setEditedSteps(plan.steps); }}
+              <button onClick={() => { setEditMode(true); setEditedSteps(plan.steps); setInputDrafts({}); setInputErrors({}); }}
                 className="text-xs text-gray-400 hover:text-gray-200 px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 flex items-center gap-1">
                 <Edit3 size={10} /> Edit
               </button>
@@ -486,7 +517,7 @@ export default function TestPlanView({
                 className="text-xs text-green-400 hover:text-green-300 px-2 py-1 rounded bg-green-500/10 hover:bg-green-500/20 flex items-center gap-1">
                 <Save size={10} /> Save
               </button>
-              <button onClick={() => { setEditMode(false); setEditedSteps(plan?.steps || []); }}
+              <button onClick={() => { setEditMode(false); setEditedSteps(plan?.steps || []); setInputDrafts({}); setInputErrors({}); }}
                 className="text-xs text-gray-400 hover:text-gray-300 px-2 py-1 rounded bg-gray-800 hover:bg-gray-700">
                 Cancel
               </button>
@@ -578,25 +609,27 @@ export default function TestPlanView({
       {!plan && !creating && (
         <div className="text-center py-8 border border-dashed border-gray-700 rounded-lg">
           <Brain size={32} className="mx-auto mb-3 text-gray-600" />
-          <p className="text-gray-400 text-sm mb-3">No test plan exists for this action yet.</p>
+          <p className="text-gray-400 text-sm mb-3">No test plan exists for this {isTrigger ? 'trigger' : 'action'} yet.</p>
           {hasAnthropicKey ? (
             <div className="flex flex-col items-center gap-3">
               <button onClick={createPlan}
                 className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded flex items-center gap-2">
                 <Brain size={14} /> Create Plan with AI
               </button>
-              <button
-                onClick={() => setUseV2(!useV2)}
-                className={`text-xs px-2 py-1 rounded flex items-center gap-1.5 transition-colors ${
-                  useV2
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                    : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-400'
-                }`}
-                title={useV2 ? 'v2: Multi-agent (research → plan → verify)' : 'v1: Single agent loop'}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${useV2 ? 'bg-purple-400' : 'bg-gray-600'}`} />
-                {useV2 ? 'v2 Multi-Agent' : 'v1 Classic'}
-              </button>
+              {!isTrigger && (
+                <button
+                  onClick={() => setUseV2(!useV2)}
+                  className={`text-xs px-2 py-1 rounded flex items-center gap-1.5 transition-colors ${
+                    useV2
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                      : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-400'
+                  }`}
+                  title={useV2 ? 'v2: Multi-agent (research → plan → verify)' : 'v1: Single agent loop'}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${useV2 ? 'bg-purple-400' : 'bg-gray-600'}`} />
+                  {useV2 ? 'v2 Multi-Agent' : 'v1 Classic'}
+                </button>
+              )}
             </div>
           ) : (
             <p className="text-yellow-500 text-xs">Configure Anthropic API key in Settings first.</p>
@@ -665,30 +698,81 @@ export default function TestPlanView({
                 {/* Expanded detail */}
                 {isExpanded && (
                   <div className="px-3 pb-3 pt-1 text-xs space-y-2 border-t border-gray-800/50">
-                    {step.description && <p className="text-gray-400">{step.description}</p>}
+                    {/* Label (editable) */}
+                    {editMode ? (
+                      <div>
+                        <span className="text-gray-500 font-medium">Label:</span>
+                        <input
+                          className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200"
+                          value={step.label}
+                          onChange={(e) => patchStep(step.id, { label: e.target.value })}
+                        />
+                      </div>
+                    ) : (
+                      step.description && <p className="text-gray-400">{step.description}</p>
+                    )}
 
-                    {step.actionName && (
-                      <div className="text-gray-500">
-                        <span className="font-medium">Action:</span> <code className="text-gray-300">{step.actionName}</code>
+                    {/* Description (editable) */}
+                    {editMode && (
+                      <div>
+                        <span className="text-gray-500 font-medium">Description:</span>
+                        <textarea
+                          className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 resize-y"
+                          rows={2}
+                          value={step.description}
+                          onChange={(e) => patchStep(step.id, { description: e.target.value })}
+                        />
                       </div>
                     )}
 
-                    {/* Static input */}
-                    {Object.keys(step.input).length > 0 && (
+                    {/* Action / trigger target */}
+                    {step.kind === 'trigger' ? (
+                      <div className="text-gray-500">
+                        <span className="font-medium">Trigger:</span>{' '}
+                        <code className="text-gray-300">{step.triggerName || step.actionName}</code>
+                        {step.triggerStrategy && <span className="text-gray-600 ml-1">({step.triggerStrategy})</span>}
+                      </div>
+                    ) : step.actionName ? (
+                      editMode ? (
+                        <div>
+                          <span className="text-gray-500 font-medium">Action:</span>
+                          <input
+                            className="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono text-gray-200"
+                            value={step.actionName}
+                            onChange={(e) => patchStep(step.id, { actionName: e.target.value })}
+                          />
+                        </div>
+                      ) : (
+                        <div className="text-gray-500">
+                          <span className="font-medium">Action:</span> <code className="text-gray-300">{step.actionName}</code>
+                        </div>
+                      )
+                    ) : null}
+
+                    {/* Static input — always editable in edit mode (even when empty) */}
+                    {(editMode || Object.keys(step.input).length > 0) && (
                       <div>
                         <span className="text-gray-500 font-medium">Input:</span>
                         {editMode ? (
-                          <textarea
-                            className="w-full mt-1 bg-gray-800 border border-gray-700 rounded p-2 text-xs font-mono text-gray-300 resize-y"
-                            rows={3}
-                            value={JSON.stringify(step.input, null, 2)}
-                            onChange={(e) => {
-                              try {
-                                const parsed = JSON.parse(e.target.value);
-                                setEditedSteps(prev => prev.map(s => s.id === step.id ? { ...s, input: parsed } : s));
-                              } catch { /* ignore invalid JSON while typing */ }
-                            }}
-                          />
+                          <>
+                            <textarea
+                              className={`w-full mt-1 bg-gray-800 border rounded p-2 text-xs font-mono text-gray-300 resize-y ${inputErrors[step.id] ? 'border-red-500/60' : 'border-gray-700'}`}
+                              rows={4}
+                              value={inputDrafts[step.id] ?? JSON.stringify(step.input, null, 2)}
+                              onChange={(e) => {
+                                const text = e.target.value;
+                                setInputDrafts(prev => ({ ...prev, [step.id]: text }));
+                                try {
+                                  const parsed = JSON.parse(text);
+                                  patchStep(step.id, { input: parsed });
+                                  setInputErrors(prev => ({ ...prev, [step.id]: false }));
+                                } catch {
+                                  setInputErrors(prev => ({ ...prev, [step.id]: true }));
+                                }
+                              }}
+                            />
+                            {inputErrors[step.id] && <span className="text-[10px] text-red-400">Invalid JSON — last valid value will be kept.</span>}
+                          </>
                         ) : (
                           <pre className="mt-1 bg-gray-800/50 rounded p-2 overflow-x-auto text-gray-300 font-mono">
                             {JSON.stringify(step.input, null, 2)}
@@ -697,26 +781,70 @@ export default function TestPlanView({
                       </div>
                     )}
 
-                    {/* Input mapping */}
-                    {(() => {
-                      const mapping = step.inputMapping || {};
-                      const entries = Object.entries(mapping);
-                      if (entries.length === 0) return null;
-                      return (
-                        <div>
-                          <span className="text-gray-500 font-medium">Dynamic mapping:</span>
-                          <div className="mt-1 space-y-0.5">
-                            {entries.map(([field, expr]) => (
-                              <div key={field} className="flex items-center gap-2 text-gray-400">
-                                <code className="text-cyan-400">{field}</code>
-                                <span className="text-gray-600">&larr;</span>
-                                <code className="text-purple-400">{expr}</code>
-                              </div>
-                            ))}
-                          </div>
+                    {/* Input mapping — editable field→expression rows in edit mode */}
+                    {editMode ? (
+                      <div>
+                        <span className="text-gray-500 font-medium">Dynamic mapping</span>
+                        <span className="text-gray-600 ml-1">(field ← ${'{steps.<id>.output.<path>}'})</span>
+                        <div className="mt-1 space-y-1">
+                          {Object.entries(step.inputMapping || {}).map(([field, expr], mi) => (
+                            <div key={mi} className="flex items-center gap-1.5">
+                              <input
+                                className="w-1/3 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] font-mono text-cyan-300"
+                                value={field}
+                                placeholder="field"
+                                onChange={(e) => {
+                                  const m = { ...(step.inputMapping || {}) };
+                                  const val = m[field];
+                                  delete m[field];
+                                  m[e.target.value] = val;
+                                  patchStep(step.id, { inputMapping: m });
+                                }}
+                              />
+                              <span className="text-gray-600">&larr;</span>
+                              <input
+                                className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] font-mono text-purple-300"
+                                value={expr}
+                                placeholder="${steps.step_1.output.id}"
+                                onChange={(e) => patchStep(step.id, { inputMapping: { ...(step.inputMapping || {}), [field]: e.target.value } })}
+                              />
+                              <button
+                                onClick={() => { const m = { ...(step.inputMapping || {}) }; delete m[field]; patchStep(step.id, { inputMapping: m }); }}
+                                className="text-red-400 hover:text-red-300"
+                                title="Remove mapping"
+                              >
+                                <Trash2 size={11} />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => patchStep(step.id, { inputMapping: { ...(step.inputMapping || {}), '': '' } })}
+                            className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
+                          >
+                            <Plus size={10} /> Add mapping
+                          </button>
                         </div>
-                      );
-                    })()}
+                      </div>
+                    ) : (
+                      (() => {
+                        const entries = Object.entries(step.inputMapping || {});
+                        if (entries.length === 0) return null;
+                        return (
+                          <div>
+                            <span className="text-gray-500 font-medium">Dynamic mapping:</span>
+                            <div className="mt-1 space-y-0.5">
+                              {entries.map(([field, expr]) => (
+                                <div key={field} className="flex items-center gap-2 text-gray-400">
+                                  <code className="text-cyan-400">{field}</code>
+                                  <span className="text-gray-600">&larr;</span>
+                                  <code className="text-purple-400">{expr}</code>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()
+                    )}
 
                     {/* Human prompt (for human_input steps) */}
                     {step.type === 'human_input' && step.humanPrompt && (
@@ -774,6 +902,16 @@ export default function TestPlanView({
                             </button>
                           </div>
                         )}
+                      </div>
+                    )}
+
+                    {/* Live step logs (e.g. webhook subscribe/receive) */}
+                    {sr?.logs && sr.logs.length > 0 && (
+                      <div>
+                        <span className="text-gray-400 font-medium">Logs:</span>
+                        <pre className="mt-1 bg-gray-800/50 rounded p-2 overflow-x-auto text-gray-300/80 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap">
+                          {sr.logs.join('\n')}
+                        </pre>
                       </div>
                     )}
 
@@ -967,18 +1105,20 @@ export default function TestPlanView({
                 className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-sm rounded flex items-center gap-2 text-gray-400">
                 <RotateCcw size={14} /> Regenerate
               </button>
-              <button
-                onClick={() => setUseV2(!useV2)}
-                className={`px-2 py-2 text-xs rounded flex items-center gap-1.5 transition-colors ${
-                  useV2
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                    : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-400'
-                }`}
-                title={useV2 ? 'v2: Multi-agent system (research → plan → verify)' : 'v1: Single agent loop'}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${useV2 ? 'bg-purple-400' : 'bg-gray-600'}`} />
-                {useV2 ? 'v2' : 'v1'}
-              </button>
+              {!isTrigger && (
+                <button
+                  onClick={() => setUseV2(!useV2)}
+                  className={`px-2 py-2 text-xs rounded flex items-center gap-1.5 transition-colors ${
+                    useV2
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                      : 'bg-gray-800 text-gray-500 border border-gray-700 hover:text-gray-400'
+                  }`}
+                  title={useV2 ? 'v2: Multi-agent system (research → plan → verify)' : 'v1: Single agent loop'}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${useV2 ? 'bg-purple-400' : 'bg-gray-600'}`} />
+                  {useV2 ? 'v2' : 'v1'}
+                </button>
+              )}
             </>
           ) : executing ? (
             <div className="flex items-center gap-2 text-sm text-blue-400">
@@ -1027,8 +1167,8 @@ export default function TestPlanView({
                   : <><XCircle size={16} /> Plan execution failed</>}
               </div>
 
-              {/* Fix with AI button */}
-              {hasFailed && hasAnthropicKey && !fixing && (
+              {/* Fix with AI button (not available for trigger plans yet) */}
+              {hasFailed && hasAnthropicKey && !fixing && !isTrigger && (
                 <button onClick={fixPlan}
                   className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs rounded flex items-center gap-1.5 font-medium">
                   <Wrench size={12} /> Fix with AI

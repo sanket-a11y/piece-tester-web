@@ -9,6 +9,10 @@ import {
   getTestPlan, type TestPlanRunRow,
 } from '../db/queries.js';
 import { executeActionOnAP, type TestPlanStep } from './ai-config-generator.js';
+import {
+  executeTriggerOnAP, armTriggerSimulation, captureTriggerEvents, cancelTriggerSimulation,
+  type TriggerSimContext,
+} from './trigger-engine.js';
 import { createClient } from './test-engine.js';
 import type { PieceMetadataFull } from './ap-client.js';
 
@@ -22,6 +26,8 @@ export interface StepResult {
   error: string | null;
   duration_ms: number;
   humanResponse?: string;
+  /** Live progress log lines (e.g. webhook subscribe/receive during trigger steps). */
+  logs?: string[];
 }
 
 export interface PlanProgress {
@@ -83,6 +89,24 @@ function resolveBuiltinTokens(input: Record<string, unknown>): Record<string, un
 
 // ── InputMapping resolver ──
 
+/**
+ * Set a value at a (possibly dotted) field path, creating intermediate objects.
+ * e.g. setDeep(obj, "variables.id", v) -> obj.variables = { ...obj.variables, id: v }.
+ * A plain key with no dots behaves like obj[field] = v.
+ */
+function setDeep(target: Record<string, unknown>, fieldPath: string, value: unknown): void {
+  const parts = fieldPath.split('.');
+  let cursor: Record<string, unknown> = target;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const key = parts[i];
+    if (cursor[key] === null || typeof cursor[key] !== 'object' || Array.isArray(cursor[key])) {
+      cursor[key] = {};
+    }
+    cursor = cursor[key] as Record<string, unknown>;
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
 function resolveInputMapping(
   step: TestPlanStep,
   previousResults: Map<string, StepResult>,
@@ -98,7 +122,7 @@ function resolveInputMapping(
     const match = expression.match(/^\$\{steps\.([^.]+)\.(.+)\}$/);
     if (!match) {
       // Not a valid expression, use as literal
-      resolved[fieldName] = expression;
+      setDeep(resolved, fieldName, expression);
       continue;
     }
 
@@ -118,13 +142,65 @@ function resolveInputMapping(
     }
 
     if (value !== undefined) {
-      resolved[fieldName] = value;
+      // fieldName may be a dotted path (e.g. "variables.id") -> set nested.
+      setDeep(resolved, fieldName, value);
     } else {
       console.warn(`[plan-executor] inputMapping: path "${pathStr}" resolved to undefined for step "${refStepId}"`);
     }
   }
 
   return resolveBuiltinTokens(resolved);
+}
+
+// ── Step dispatch ──
+// An action step runs a piece action via test-step. A trigger step runs a piece trigger
+// via the test-trigger endpoint:
+//  - TEST_FUNCTION (polling): one self-contained trigger_test step.
+//  - SIMULATION (webhook): a trigger_arm step arms a persistent listener, generator
+//    action steps cause the event, and a trigger_test step captures it. The armed
+//    listener (TriggerSimContext) lives in `simRef` across those steps and is cancelled
+//    in executePlan's finally.
+
+/** Mutable holder for the in-flight SIMULATION listener (one trigger under test per plan). */
+type TriggerSimRef = { current: TriggerSimContext | null };
+
+async function executeStepOnAP(
+  pieceMeta: PieceMetadataFull,
+  step: TestPlanStep,
+  resolvedInput: Record<string, unknown>,
+  simRef: TriggerSimRef,
+  onLog?: (msg: string) => void,
+): Promise<unknown> {
+  if (step.kind === 'trigger') {
+    const triggerName = step.triggerName || step.actionName;
+    const strategy = step.triggerStrategy || 'TEST_FUNCTION';
+
+    if (strategy === 'SIMULATION') {
+      if (step.type === 'trigger_arm') {
+        // Arm the listener and keep it alive for later generator + capture steps.
+        if (simRef.current) {
+          // Defensive: a prior armed listener wasn't cancelled -- do so before re-arming.
+          await cancelTriggerSimulation(simRef.current).catch(() => {});
+          simRef.current = null;
+        }
+        simRef.current = await armTriggerSimulation(pieceMeta, triggerName, resolvedInput, onLog);
+        return { armed: true, triggerName };
+      }
+      // trigger_test (capture)
+      if (!simRef.current) {
+        throw new Error('SIMULATION trigger_test reached with no armed listener -- the plan is missing a trigger_arm step before the generator.');
+      }
+      const captured = await captureTriggerEvents(simRef.current, undefined, onLog);
+      if (captured.sampleCount === 0) {
+        throw new Error('No trigger event was captured within the timeout. The generator step may not have fired the trigger, or the webhook subscription did not deliver.');
+      }
+      return captured;
+    }
+
+    // TEST_FUNCTION (polling)
+    return executeTriggerOnAP(pieceMeta, triggerName, resolvedInput, 'TEST_FUNCTION', onLog);
+  }
+  return executeActionOnAP(pieceMeta, step.actionName, resolvedInput);
 }
 
 // ── Main executor ──
@@ -152,6 +228,10 @@ export async function executePlan(
 
   const stepResults = new Map<string, StepResult>();
   const resultsArray: StepResult[] = [];
+
+  // Holds the armed SIMULATION listener (webhook triggers) across arm -> generate -> capture.
+  // Always cancelled in the finally below.
+  const triggerSim: TriggerSimRef = { current: null };
 
   // Initialize all step results as pending
   for (const step of steps) {
@@ -317,8 +397,23 @@ export async function executePlan(
         // Resolve inputMapping
         const resolvedInput = resolveInputMapping(step, stepResults);
 
-        // Execute the action
-        const output = await executeActionOnAP(pieceMeta, step.actionName, resolvedInput);
+        // Live per-step logging (e.g. webhook subscribe/receive) -- append to the step
+        // result and push an update so the UI sees it in real time.
+        const stepLog = (msg: string) => {
+          const ts = new Date().toISOString().slice(11, 19);
+          sr.logs = [...(sr.logs ?? []), `[${ts}] ${msg}`];
+          saveResults();
+          onProgress({
+            type: 'step_start',
+            runId,
+            stepId: step.id,
+            message: msg,
+            stepResults: steps.map(s => stepResults.get(s.id)!),
+          });
+        };
+
+        // Execute the step (action via test-step, or trigger via test-trigger)
+        const output = await executeStepOnAP(pieceMeta, step, resolvedInput, triggerSim, stepLog);
 
         sr.status = 'completed';
         sr.output = output;
@@ -348,7 +443,7 @@ export async function executePlan(
         });
 
         // If a setup or test step fails, stop the plan (but still run cleanup steps)
-        if (step.type === 'setup' || step.type === 'test') {
+        if (step.type === 'setup' || step.type === 'test' || step.type === 'trigger_arm' || step.type === 'trigger_test') {
           // Skip remaining non-cleanup steps, run cleanup steps
           const currentIdx = steps.indexOf(step);
           for (let i = currentIdx + 1; i < steps.length; i++) {
@@ -360,7 +455,7 @@ export async function executePlan(
               saveResults();
               try {
                 const cleanupInput = resolveInputMapping(futureStep, stepResults);
-                const cleanupOutput = await executeActionOnAP(pieceMeta, futureStep.actionName, cleanupInput);
+                const cleanupOutput = await executeStepOnAP(pieceMeta, futureStep, cleanupInput, triggerSim);
                 futureSr.status = 'completed';
                 futureSr.output = cleanupOutput;
               } catch {
@@ -422,6 +517,12 @@ export async function executePlan(
       message: err.message || 'Unknown error',
       stepResults: steps.map(s => stepResults.get(s.id)!),
     });
+  } finally {
+    // Always disarm any SIMULATION listener and delete its flow, even on failure/abort.
+    if (triggerSim.current) {
+      await cancelTriggerSimulation(triggerSim.current).catch(() => {});
+      triggerSim.current = null;
+    }
   }
 
   cleanupEmitter(runId);

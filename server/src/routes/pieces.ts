@@ -3,14 +3,14 @@ import { createClient } from '../services/test-engine.js';
 import { ActivepiecesClient } from '../services/ap-client.js';
 import { generateTestConfig } from '../services/test-config-generator.js';
 import { configureActionWithAi, fixActionWithAi, createTestPlanWithAi, fixTestPlanWithAi, type AgentLogEntry, type AiActionResult } from '../services/ai-config-generator.js';
-import { createTestPlan, getTestPlanByAction, updateTestPlan, getLessonsForPiece, deleteLesson, addLesson } from '../db/queries.js';
+import { createTestPlan, getTestPlanByAction, getTestPlanByTrigger, updateTestPlan, getLessonsForPiece, deleteLesson, addLesson } from '../db/queries.js';
 import { executePlan } from '../services/plan-executor.js';
 import { extractAndStoreLessons } from '../services/lesson-extractor.js';
 import {
   getJob, createJob, emitJobEvent, completeJob, getActiveJobsForPiece, subscribeToJobWithCleanup,
   cancelPlanJob, cancelAllPlanJobs, type PlanJob,
 } from '../services/plan-jobs.js';
-import { createTestPlanV2, fixTestPlanV2 } from '../agents/v2/index.js';
+import { createTestPlanV2, fixTestPlanV2, createTriggerTestPlanV2 } from '../agents/v2/index.js';
 import type { AgentLogEntry as V2LogEntry } from '../agents/v2/types.js';
 import { detectBrokenInputMappings } from '../agents/v2/tools/inspect-output.js';
 
@@ -30,6 +30,11 @@ router.post('/:name/actions/:action/ai-plan/cancel', (req, res) => {
 
 router.post('/:name/actions/:action/ai-plan-v2/cancel', (req, res) => {
   const ok = cancelPlanJob(req.params.name, `v2:${req.params.action}`);
+  res.json({ cancelled: ok });
+});
+
+router.post('/:name/triggers/:trigger/ai-plan-v2/cancel', (req, res) => {
+  const ok = cancelPlanJob(req.params.name, `v2:trigger:${req.params.trigger}`);
   res.json({ cancelled: ok });
 });
 
@@ -620,6 +625,128 @@ router.get('/:name/actions/:action/ai-plan-v2', async (req, res) => {
 
   const unsubscribe = subscribeToJobWithCleanup(job, sendEvent, () => res.end());
   res.on('close', () => { unsubscribe(); console.log(`[ai-plan-v2] Client disconnected from ${actionName} (job continues)`); });
+});
+
+// ── Trigger plan creation (polling triggers) ──
+
+function runTriggerPlanJobV2InBackground(job: PlanJob, pieceName: string, triggerName: string, previousMemory?: string) {
+  (async () => {
+    const signal = job.abortController.signal;
+    try {
+      const client = createClient();
+      const piece = await client.getPieceMetadata(pieceName);
+
+      if (!piece.triggers[triggerName]) {
+        emitJobEvent(job, 'error', { message: `Trigger "${triggerName}" not found` });
+        emitJobEvent(job, 'done', {});
+        completeJob(job, 'error');
+        return;
+      }
+
+      const onLog = (log: V2LogEntry) => emitJobEvent(job, 'log', log);
+
+      const planResult = await createTriggerTestPlanV2({
+        pieceMeta: piece,
+        triggerName,
+        previousMemory: previousMemory || undefined,
+        onLog,
+        abortSignal: signal,
+      });
+
+      if (signal.aborted || job.status !== 'running') return;
+
+      const saved = createTestPlan({
+        piece_name: pieceName,
+        target_action: triggerName,
+        target_type: 'trigger',
+        steps: JSON.stringify(planResult.steps),
+        status: 'draft',
+        agent_memory: planResult.agentMemory || '',
+      });
+
+      emitJobEvent(job, 'result', {
+        planId: saved.id,
+        steps: planResult.steps,
+        note: planResult.note,
+        agentMemory: planResult.agentMemory,
+        status: 'draft',
+        version: 'v2',
+        targetType: 'trigger',
+        costSummary: (planResult as any).costSummary,
+      });
+
+      // Auto-test the plan once (polling triggers are read-only; no automated fixer in Phase A).
+      const hasHumanInputSteps = planResult.steps.some((s: any) => s.type === 'human_input');
+      if (!hasHumanInputSteps && planResult.steps.length > 0) {
+        onLog({ timestamp: Date.now(), type: 'thinking', role: 'coordinator', message: 'Auto-testing trigger plan...' });
+        const finalRun = await executePlan(saved.id, (progress) => {
+          emitJobEvent(job, 'plan_progress', progress);
+        }, 'auto_test', signal);
+
+        if (signal.aborted || job.status !== 'running') return;
+
+        if (finalRun.status === 'completed') {
+          onLog({ timestamp: Date.now(), type: 'done', role: 'coordinator', message: 'Auto-test passed! Trigger plan is verified and working.' });
+          updateTestPlan(saved.id, { status: 'approved' });
+          emitJobEvent(job, 'result', {
+            planId: saved.id,
+            steps: planResult.steps,
+            note: planResult.note,
+            agentMemory: planResult.agentMemory,
+            status: 'approved',
+            autoTestPassed: true,
+            version: 'v2',
+            targetType: 'trigger',
+          });
+        } else {
+          onLog({ timestamp: Date.now(), type: 'error', role: 'coordinator', message: 'Auto-test did not pass. Leaving plan as draft for review.' });
+        }
+      } else if (hasHumanInputSteps) {
+        onLog({ timestamp: Date.now(), type: 'thinking', role: 'coordinator', message: 'Plan has human_input steps — skipping auto-test.' });
+      }
+
+      if (signal.aborted || job.status !== 'running') return;
+      emitJobEvent(job, 'done', {});
+      completeJob(job, 'done');
+    } catch (err: any) {
+      if (job.status !== 'running') return;
+      const aborted = signal.aborted || /aborted|AbortError/i.test(err?.message ?? '') || err?.name === 'AbortError';
+      if (aborted) {
+        emitJobEvent(job, 'error', { message: 'Cancelled by user.', cancelled: true });
+        emitJobEvent(job, 'done', {});
+        completeJob(job, 'error');
+        return;
+      }
+      console.error(`[ai-plan-v2-trigger] Background job error for ${triggerName}:`, err.message);
+      emitJobEvent(job, 'error', { message: err.message || 'Unknown error' });
+      emitJobEvent(job, 'done', {});
+      completeJob(job, 'error');
+    }
+  })();
+}
+
+router.get('/:name/triggers/:trigger/ai-plan-v2', async (req, res) => {
+  req.setTimeout(600_000);
+  const sendEvent = setupSSE(res);
+  const pieceName = req.params.name;
+  const triggerName = req.params.trigger;
+
+  const jobKey = `v2:trigger:${triggerName}`;
+  const existingJob = getJob(pieceName, jobKey);
+
+  if (existingJob && existingJob.status === 'running') {
+    console.log(`[ai-plan-v2-trigger] Client reconnecting to running job for ${triggerName}`);
+    const unsubscribe = subscribeToJobWithCleanup(existingJob, sendEvent, () => res.end());
+    res.on('close', () => { unsubscribe(); });
+    return;
+  }
+
+  const previousMemory = req.query.memory as string | undefined;
+  const job = createJob(pieceName, jobKey);
+  runTriggerPlanJobV2InBackground(job, pieceName, triggerName, previousMemory);
+
+  const unsubscribe = subscribeToJobWithCleanup(job, sendEvent, () => res.end());
+  res.on('close', () => { unsubscribe(); console.log(`[ai-plan-v2-trigger] Client disconnected from ${triggerName} (job continues)`); });
 });
 
 router.post('/:name/actions/:action/ai-plan-fix-v2', async (req, res) => {

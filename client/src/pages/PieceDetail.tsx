@@ -54,6 +54,10 @@ export default function PieceDetail() {
   // ── Test Plan view (unified AI approach) ──
   const [planAction, setPlanAction] = useState<string | null>(null);
   const [actionPlans, setActionPlans] = useState<Record<string, TestPlan>>({});
+  // Trigger plans (Phase A: polling triggers), keyed by trigger name
+  const [planTrigger, setPlanTrigger] = useState<string | null>(null);
+  const [triggerPlans, setTriggerPlans] = useState<Record<string, TestPlan>>({});
+  const [enabledTriggers, setEnabledTriggers] = useState<Set<string>>(new Set());
   const [setupAllRunning, setSetupAllRunning] = useState(false);
   const [setupMode, setSetupMode] = useState<'create_missing' | 'replace_existing' | null>(null);
   const [setupAllProgress, setSetupAllProgress] = useState<{ current: number; total: number; currentAction: string } | null>(null);
@@ -72,7 +76,8 @@ export default function PieceDetail() {
 
   // ── Plan execution state ──
   interface PlanRunState {
-    actionName: string;
+    actionName: string;          // target name (action or trigger)
+    targetKind: 'action' | 'trigger';
     planId: number;
     status: 'pending' | 'running' | 'completed' | 'failed' | 'paused';
     stepResults: StepResult[];
@@ -80,6 +85,8 @@ export default function PieceDetail() {
     runId?: number;
     error?: string;
   }
+  /** Unique identity for a run row (an action and trigger can share a name). */
+  const runKey = (kind: 'action' | 'trigger', targetName: string) => `${kind}:${targetName}`;
   const [planRuns, setPlanRuns] = useState<PlanRunState[]>([]);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const [humanInputValue, setHumanInputValue] = useState('');
@@ -146,13 +153,22 @@ export default function PieceDetail() {
       try {
         const plans = await api.listTestPlans(name);
         const planMap: Record<string, TestPlan> = {};
+        const triggerMap: Record<string, TestPlan> = {};
         const enabled = new Set(enabledActions);
+        const enabledTrig = new Set(enabledTriggers);
         for (const p of plans) {
-          planMap[p.target_action] = p;
-          enabled.add(p.target_action);
+          if (p.target_type === 'trigger') {
+            triggerMap[p.target_action] = p;
+            enabledTrig.add(p.target_action);
+          } else {
+            planMap[p.target_action] = p;
+            enabled.add(p.target_action);
+          }
         }
         setActionPlans(planMap);
+        setTriggerPlans(triggerMap);
         setEnabledActions(enabled);
+        setEnabledTriggers(enabledTrig);
       } catch {
         // No plans yet
       }
@@ -569,6 +585,30 @@ export default function PieceDetail() {
     }
   }, [name]);
 
+  // Callback for the trigger TestPlanView to notify parent when a trigger plan changes
+  const onTriggerPlanChange = useCallback((triggerName: string, plan: TestPlan | null) => {
+    setTriggerPlans(prev => {
+      const next = { ...prev };
+      if (plan) next[triggerName] = plan;
+      else delete next[triggerName];
+      return next;
+    });
+    // Auto-select when a trigger plan is created so it joins the bulk run
+    if (plan) {
+      setEnabledTriggers(prev => { const next = new Set(prev); next.add(triggerName); return next; });
+    }
+    setActiveAiJobs(prev => {
+      const key = `v2:trigger:${triggerName}`;
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    if (name) {
+      api.getAiPlanJobs(name).then(setActiveAiJobs).catch(() => {});
+    }
+  }, [name]);
+
   function toggleAction(actionName: string) {
     setEnabledActions(prev => {
       const next = new Set(prev);
@@ -579,6 +619,14 @@ export default function PieceDetail() {
         api.saveActionConfig(localConn.id, actionName, { enabled: nowEnabled })
           .catch(err => console.warn('[save] toggle failed:', err.message));
       }
+      return next;
+    });
+  }
+
+  function toggleTrigger(triggerName: string) {
+    setEnabledTriggers(prev => {
+      const next = new Set(prev);
+      if (next.has(triggerName)) next.delete(triggerName); else next.add(triggerName);
       return next;
     });
   }
@@ -596,11 +644,15 @@ export default function PieceDetail() {
   async function handleRunPlans() {
     if (!name) return;
 
-    // Gather plans for enabled actions
-    const plansToRun: { actionName: string; plan: TestPlan }[] = [];
+    // Gather plans for enabled actions, then enabled triggers
+    const plansToRun: { targetKind: 'action' | 'trigger'; actionName: string; plan: TestPlan }[] = [];
     for (const actionName of enabledActions) {
       const plan = actionPlans[actionName];
-      if (plan) plansToRun.push({ actionName, plan });
+      if (plan) plansToRun.push({ targetKind: 'action', actionName, plan });
+    }
+    for (const triggerName of enabledTriggers) {
+      const plan = triggerPlans[triggerName];
+      if (plan) plansToRun.push({ targetKind: 'trigger', actionName: triggerName, plan });
     }
 
     if (plansToRun.length === 0) return;
@@ -610,14 +662,15 @@ export default function PieceDetail() {
     runControllerRef.current = controller;
 
     // Initialize all runs
-    const initialRuns: PlanRunState[] = plansToRun.map(({ actionName, plan }) => ({
+    const initialRuns: PlanRunState[] = plansToRun.map(({ targetKind, actionName, plan }) => ({
       actionName,
+      targetKind,
       planId: plan.id,
       status: 'pending' as const,
       stepResults: [],
     }));
     setPlanRuns(initialRuns);
-    setExpandedRun(plansToRun[0]?.actionName || null);
+    setExpandedRun(plansToRun[0] ? runKey(plansToRun[0].targetKind, plansToRun[0].actionName) : null);
     setRunning(true);
     setStep('test');
 
@@ -625,11 +678,12 @@ export default function PieceDetail() {
     for (let i = 0; i < plansToRun.length; i++) {
       if (controller.signal.aborted) break;
 
-      const { actionName, plan } = plansToRun[i];
+      const { targetKind, actionName, plan } = plansToRun[i];
+      const isMatch = (r: PlanRunState) => r.targetKind === targetKind && r.actionName === actionName;
 
       // Mark as running
-      setPlanRuns(prev => prev.map(r => r.actionName === actionName ? { ...r, status: 'running' } : r));
-      setExpandedRun(actionName);
+      setPlanRuns(prev => prev.map(r => isMatch(r) ? { ...r, status: 'running' } : r));
+      setExpandedRun(runKey(targetKind, actionName));
 
       try {
         await new Promise<void>((resolve, reject) => {
@@ -638,7 +692,7 @@ export default function PieceDetail() {
           const ctrl = api.streamPlanExecution(plan.id, {
             onProgress: (progress: PlanProgress) => {
               setPlanRuns(prev => prev.map(r => {
-                if (r.actionName !== actionName) return r;
+                if (!isMatch(r)) return r;
                 const updated = { ...r, stepResults: progress.stepResults || r.stepResults };
                 if (progress.runId) updated.runId = progress.runId;
                 if (progress.type === 'paused_for_human') {
@@ -655,7 +709,7 @@ export default function PieceDetail() {
             },
             onDone: (data) => {
               setPlanRuns(prev => prev.map(r => {
-                if (r.actionName !== actionName) return r;
+                if (!isMatch(r)) return r;
                 return {
                   ...r,
                   status: data.status === 'completed' ? 'completed' : 'failed',
@@ -667,7 +721,7 @@ export default function PieceDetail() {
             },
             onError: (msg) => {
               setPlanRuns(prev => prev.map(r => {
-                if (r.actionName !== actionName) return r;
+                if (!isMatch(r)) return r;
                 return { ...r, status: 'failed', error: msg };
               }));
               resolve(); // Don't reject -- continue to next plan
@@ -686,8 +740,8 @@ export default function PieceDetail() {
   }
 
   // ── Respond to human input during plan execution ──
-  async function respondToRunPause(actionName: string, approved?: boolean) {
-    const run = planRuns.find(r => r.actionName === actionName);
+  async function respondToRunPause(targetKind: 'action' | 'trigger', actionName: string, approved?: boolean) {
+    const run = planRuns.find(r => r.targetKind === targetKind && r.actionName === actionName);
     if (!run?.runId || !run.pausedInfo) return;
 
     const response = run.pausedInfo.type === 'human' ? humanInputValue : undefined;
@@ -701,20 +755,21 @@ export default function PieceDetail() {
 
       // Optionally save the human response for future runs
       if (saveHumanForFuture && run.pausedInfo.type === 'human' && response) {
-        const plan = actionPlans[actionName];
+        const plan = targetKind === 'trigger' ? triggerPlans[actionName] : actionPlans[actionName];
         if (plan) {
           const updatedSteps = plan.steps.map(s =>
             s.id === run.pausedInfo!.stepId ? { ...s, savedHumanResponse: response } : s
           );
           try {
             const updated = await api.updateTestPlan(plan.id, { steps: updatedSteps });
-            onPlanChange(actionName, updated);
+            if (targetKind === 'trigger') onTriggerPlanChange(actionName, updated);
+            else onPlanChange(actionName, updated);
           } catch { /* ignore */ }
         }
       }
 
       setPlanRuns(prev => prev.map(r =>
-        r.actionName === actionName ? { ...r, status: 'running', pausedInfo: undefined } : r
+        (r.targetKind === targetKind && r.actionName === actionName) ? { ...r, status: 'running', pausedInfo: undefined } : r
       ));
       setHumanInputValue('');
     } catch (err: any) {
@@ -730,6 +785,7 @@ export default function PieceDetail() {
   const authType = piece.auth?.type;
   const isOAuth = authType === 'OAUTH2' || authType === 'PLATFORM_OAUTH2';
   const actionList = Object.entries(piece.actions || {}) as [string, any][];
+  const triggerList = Object.entries(piece.triggers || {}) as [string, any][];
   const hasAnthropicKey = settings?.has_anthropic_key;
 
   return (
@@ -752,6 +808,7 @@ export default function PieceDetail() {
           <p className="text-sm text-gray-400 mt-1">{piece.description}</p>
           <div className="flex gap-4 mt-2 text-xs text-gray-500">
             <span>{actionList.length} actions</span>
+            {triggerList.length > 0 && <span>{triggerList.length} triggers</span>}
             {authType ? (
               <span className="bg-gray-800 px-2 py-0.5 rounded">Auth: {authType}</span>
             ) : (
@@ -1106,28 +1163,134 @@ export default function PieceDetail() {
             })}
           </div>
 
+          {/* Triggers list */}
+          {triggerList.length > 0 && (
+            <div className="mb-6">
+              <div className="flex items-center gap-2 mb-2">
+                <h3 className="text-sm font-semibold text-gray-300">Triggers</h3>
+                <span className="text-xs text-gray-500">{triggerList.length}</span>
+                <span className="text-[10px] text-gray-600">· polling = test-trigger; webhook = arm → fire → capture</span>
+              </div>
+              <div className="space-y-2">
+                {triggerList.map(([triggerName, triggerMeta]) => {
+                  const strategy: string = triggerMeta.type || 'UNKNOWN';
+                  const isPolling = strategy === 'POLLING';
+                  const isWebhook = strategy === 'WEBHOOK' || strategy === 'APP_WEBHOOK';
+                  const isSupported = isPolling || isWebhook;
+                  const hasPlan = !!triggerPlans[triggerName];
+                  const planStatus = triggerPlans[triggerName]?.status;
+                  const isPlanOpen = planTrigger === triggerName;
+                  const isEnabled = enabledTriggers.has(triggerName);
+                  const jobStatus = activeAiJobs[`v2:trigger:${triggerName}`]?.status;
+                  const hasActiveJob = jobStatus === 'running' || jobStatus === 'pending';
+
+                  return (
+                    <div key={triggerName} className={`rounded-lg border transition-colors ${
+                      !isEnabled && hasPlan ? 'opacity-50 border-gray-800 bg-gray-900' :
+                      isPlanOpen ? 'border-purple-500/30 bg-purple-500/5' : 'border-gray-800 bg-gray-900'
+                    }`}>
+                      <div className="flex items-center gap-3 px-3 py-2.5">
+                        {/* Selection checkbox (only meaningful once a plan exists) */}
+                        <button
+                          onClick={() => toggleTrigger(triggerName)}
+                          disabled={!hasPlan}
+                          title={hasPlan ? 'Include in bulk run' : 'Create a plan first'}
+                          className={`w-5 h-5 rounded border flex-shrink-0 flex items-center justify-center transition-colors ${
+                            !hasPlan ? 'border-gray-700 opacity-30 cursor-not-allowed' :
+                            isEnabled ? 'bg-primary-600 border-primary-600' : 'border-gray-600 hover:border-gray-400'
+                          }`}
+                        >
+                          {hasPlan && isEnabled && <Check size={13} className="text-white" />}
+                        </button>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-medium text-gray-200">{triggerMeta.displayName || triggerName}</span>
+                            <span className="text-[10px] text-gray-500 font-mono">{triggerName}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                              isPolling ? 'bg-green-500/10 text-green-400'
+                              : isWebhook ? 'bg-blue-500/10 text-blue-400'
+                              : 'bg-amber-500/10 text-amber-400'}`}>
+                              {strategy}
+                            </span>
+                            {hasPlan && (
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${planStatus === 'approved' ? 'bg-green-500/10 text-green-400' : 'bg-gray-700 text-gray-400'}`}>
+                                {planStatus === 'approved' ? 'approved' : 'draft'}
+                              </span>
+                            )}
+                          </div>
+                          {triggerMeta.description && (
+                            <p className="text-xs text-gray-500 mt-0.5 truncate">{triggerMeta.description}</p>
+                          )}
+                          {isWebhook && (
+                            <p className="text-[10px] text-blue-400/70 mt-0.5">
+                              Webhook trigger — tested by arming a listener, firing a generator action, then capturing the event.
+                            </p>
+                          )}
+                          {!isSupported && (
+                            <p className="text-[10px] text-amber-500/80 mt-0.5">
+                              {strategy} triggers can't be tested automatically.
+                            </p>
+                          )}
+                        </div>
+                        {hasAnthropicKey && isSupported ? (
+                          <button
+                            onClick={() => { setPlanTrigger(isPlanOpen ? null : triggerName); }}
+                            className={`text-[10px] px-2 py-1 rounded flex items-center gap-1 font-medium ${
+                              isPlanOpen ? 'bg-purple-600 text-white' : 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30'
+                            }`}
+                          >
+                            <Brain size={10} /> {hasPlan ? 'View Plan' : hasActiveJob ? 'View Progress' : 'AI Test'}
+                          </button>
+                        ) : !hasAnthropicKey ? (
+                          <span className="text-[10px] text-gray-600">Add API key</span>
+                        ) : null}
+                      </div>
+
+                      {isPlanOpen && (
+                        <div className="border-t border-purple-500/20 px-3 pb-3 pt-2">
+                          <TestPlanView
+                            pieceName={name!}
+                            actionName={triggerName}
+                            actionDisplayName={triggerMeta.displayName || triggerName}
+                            targetKind="trigger"
+                            hasAnthropicKey={hasAnthropicKey}
+                            onClose={() => setPlanTrigger(null)}
+                            onPlanChange={(plan) => onTriggerPlanChange(triggerName, plan)}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Run button */}
           {(() => {
-            const plansToRun = Array.from(enabledActions).filter(a => actionPlans[a]);
-            const noPlanCount = enabledActions.size - plansToRun.length;
+            const actionPlansToRun = Array.from(enabledActions).filter(a => actionPlans[a]);
+            const triggerPlansToRun = Array.from(enabledTriggers).filter(t => triggerPlans[t]);
+            const totalToRun = actionPlansToRun.length + triggerPlansToRun.length;
+            const noPlanCount = enabledActions.size - actionPlansToRun.length;
             return (
               <div className="flex gap-3 items-center">
                 <button
                   onClick={handleRunPlans}
-                  disabled={running || plansToRun.length === 0}
+                  disabled={running || totalToRun === 0}
                   className="flex items-center gap-2 px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg text-sm font-semibold disabled:opacity-40"
                 >
                   {running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-                  Run {plansToRun.length} Plan{plansToRun.length !== 1 ? 's' : ''}
+                  Run {totalToRun} Plan{totalToRun !== 1 ? 's' : ''}
                 </button>
                 <span className="text-xs text-gray-500">
                   {setupAllRunning
                     ? 'AI is setting up actions...'
-                    : plansToRun.length === 0
-                    ? 'Select actions with test plans to run'
-                    : noPlanCount > 0
-                    ? `${noPlanCount} selected action${noPlanCount > 1 ? 's' : ''} missing plans`
-                    : ''
+                    : totalToRun === 0
+                    ? 'Select actions or triggers with test plans to run'
+                    : [
+                        triggerPlansToRun.length > 0 ? `${triggerPlansToRun.length} trigger${triggerPlansToRun.length > 1 ? 's' : ''}` : '',
+                        noPlanCount > 0 ? `${noPlanCount} selected action${noPlanCount > 1 ? 's' : ''} missing plans` : '',
+                      ].filter(Boolean).join(' · ')
                   }
                 </span>
               </div>
@@ -1172,10 +1335,12 @@ export default function PieceDetail() {
               {/* Per-plan results */}
               <div className="space-y-3 mb-6">
                 {planRuns.map((run) => {
-                  const plan = actionPlans[run.actionName];
+                  const isTriggerRun = run.targetKind === 'trigger';
+                  const plan = isTriggerRun ? triggerPlans[run.actionName] : actionPlans[run.actionName];
                   const steps = plan?.steps || [];
-                  const isExpanded = expandedRun === run.actionName;
-                  const meta = piece?.actions?.[run.actionName];
+                  const key = runKey(run.targetKind, run.actionName);
+                  const isExpanded = expandedRun === key;
+                  const meta = isTriggerRun ? piece?.triggers?.[run.actionName] : piece?.actions?.[run.actionName];
 
                   const statusIcon = run.status === 'completed' ? <CheckCircle size={16} className="text-green-400" />
                     : run.status === 'failed' ? <XCircle size={16} className="text-red-400" />
@@ -1190,16 +1355,17 @@ export default function PieceDetail() {
                     : 'border-gray-800';
 
                   return (
-                    <div key={run.actionName} className={`border rounded-lg ${statusBorder} bg-gray-900 overflow-hidden`}>
+                    <div key={key} className={`border rounded-lg ${statusBorder} bg-gray-900 overflow-hidden`}>
                       {/* Plan header */}
                       <button
-                        onClick={() => setExpandedRun(isExpanded ? null : run.actionName)}
+                        onClick={() => setExpandedRun(isExpanded ? null : key)}
                         className="w-full flex items-center gap-3 p-3 text-left hover:bg-gray-800/50 transition-colors"
                       >
                         {statusIcon}
-                        <div className="flex-1 min-w-0">
+                        <div className="flex-1 min-w-0 flex items-center gap-2">
                           <span className="text-sm font-medium">{meta?.displayName || run.actionName}</span>
-                          <span className="text-xs text-gray-500 ml-2">{steps.length} steps</span>
+                          {isTriggerRun && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300">trigger</span>}
+                          <span className="text-xs text-gray-500">{steps.length} steps</span>
                         </div>
                         {/* Step progress mini-bar */}
                         <div className="flex items-center gap-0.5">
@@ -1237,6 +1403,8 @@ export default function PieceDetail() {
                               verify: 'text-cyan-400 bg-cyan-500/10',
                               cleanup: 'text-orange-400 bg-orange-500/10',
                               human_input: 'text-purple-400 bg-purple-500/10',
+                              trigger_arm: 'text-teal-400 bg-teal-500/10',
+                              trigger_test: 'text-green-400 bg-green-500/10',
                             };
 
                             return (
@@ -1256,6 +1424,13 @@ export default function PieceDetail() {
                                     <span className="text-[10px] text-gray-500">{(sr.duration_ms / 1000).toFixed(1)}s</span>
                                   )}
                                 </div>
+
+                                {/* Live step logs (e.g. webhook subscribe/receive) */}
+                                {sr?.logs && sr.logs.length > 0 && (
+                                  <div className="ml-8 mt-1 text-[10px] text-gray-400 bg-gray-800/50 rounded p-1.5 font-mono space-y-0.5 max-h-32 overflow-y-auto">
+                                    {sr.logs.map((line, i) => <div key={i}>{line}</div>)}
+                                  </div>
+                                )}
 
                                 {/* Step error */}
                                 {sr?.error && (
@@ -1280,12 +1455,12 @@ export default function PieceDetail() {
                                         type="text"
                                         value={humanInputValue}
                                         onChange={e => setHumanInputValue(e.target.value)}
-                                        onKeyDown={e => { if (e.key === 'Enter') respondToRunPause(run.actionName, true); }}
+                                        onKeyDown={e => { if (e.key === 'Enter') respondToRunPause(run.targetKind, run.actionName, true); }}
                                         className="flex-1 bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200"
                                         placeholder="Type your response..."
                                         autoFocus
                                       />
-                                      <button onClick={() => respondToRunPause(run.actionName, true)}
+                                      <button onClick={() => respondToRunPause(run.targetKind, run.actionName, true)}
                                         className="px-2 py-1 bg-yellow-600 hover:bg-yellow-500 text-white text-[10px] rounded">
                                         Submit
                                       </button>
@@ -1302,11 +1477,11 @@ export default function PieceDetail() {
                                   <div className="ml-8 mt-2 bg-yellow-500/10 border border-yellow-500/20 rounded p-2.5">
                                     <p className="text-xs text-yellow-300 mb-2">{run.pausedInfo.prompt}</p>
                                     <div className="flex gap-2">
-                                      <button onClick={() => respondToRunPause(run.actionName, true)}
+                                      <button onClick={() => respondToRunPause(run.targetKind, run.actionName, true)}
                                         className="px-2 py-1 bg-green-600 hover:bg-green-500 text-white text-[10px] rounded flex items-center gap-1">
                                         <Check size={10} /> Approve
                                       </button>
-                                      <button onClick={() => respondToRunPause(run.actionName, false)}
+                                      <button onClick={() => respondToRunPause(run.targetKind, run.actionName, false)}
                                         className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-gray-200 text-[10px] rounded">
                                         Skip
                                       </button>
@@ -1317,14 +1492,18 @@ export default function PieceDetail() {
                             );
                           })}
 
-                          {/* Fix with AI for failed plans */}
+                          {/* Failed plan: actions get an AI fixer; triggers just open the plan (no fixer yet) */}
                           {run.status === 'failed' && hasAnthropicKey && (
                             <div className="flex items-center gap-2 pt-2 mt-1 border-t border-gray-800/50">
                               <button
-                                onClick={() => { setPlanAction(run.actionName); setStep('configure'); }}
+                                onClick={() => {
+                                  if (isTriggerRun) { setPlanTrigger(run.actionName); }
+                                  else { setPlanAction(run.actionName); }
+                                  setStep('configure');
+                                }}
                                 className="text-xs bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 px-3 py-1.5 rounded flex items-center gap-1.5"
                               >
-                                <Brain size={11} /> Fix with AI
+                                <Brain size={11} /> {isTriggerRun ? 'View Plan' : 'Fix with AI'}
                               </button>
                             </div>
                           )}

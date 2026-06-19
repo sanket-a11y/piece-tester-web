@@ -609,11 +609,24 @@ function TargetPicker({
   const [expandedPieces, setExpandedPieces] = useState<Set<string>>(new Set());
   const allPiecesSelected = targets.length === 0;
 
-  // group plans by piece
+  // group plans by piece (target names), and track which targets are triggers
   const plansByPiece: Record<string, string[]> = {};
+  const targetTypeByPiece: Record<string, Record<string, 'action' | 'trigger'>> = {};
   for (const plan of allPlans as any[]) {
-    if (!plansByPiece[plan.piece_name]) plansByPiece[plan.piece_name] = [];
+    if (!plansByPiece[plan.piece_name]) { plansByPiece[plan.piece_name] = []; targetTypeByPiece[plan.piece_name] = {}; }
     plansByPiece[plan.piece_name].push(plan.target_action);
+    targetTypeByPiece[plan.piece_name][plan.target_action] = plan.target_type === 'trigger' ? 'trigger' : 'action';
+  }
+  const isTriggerTarget = (pieceName: string, name: string) => targetTypeByPiece[pieceName]?.[name] === 'trigger';
+  /** Human label like "2 actions · 3 triggers" for a piece's plans. */
+  function planCountLabel(pieceName: string): string {
+    const names = plansByPiece[pieceName] ?? [];
+    const triggers = names.filter(n => isTriggerTarget(pieceName, n)).length;
+    const actions = names.length - triggers;
+    const parts: string[] = [];
+    if (actions > 0) parts.push(`${actions} action${actions !== 1 ? 's' : ''}`);
+    if (triggers > 0) parts.push(`${triggers} trigger${triggers !== 1 ? 's' : ''}`);
+    return parts.join(' · ') || '0 plans';
   }
 
   function toggleAllPieces() {
@@ -689,7 +702,7 @@ function TargetPicker({
     ? 'Runs all pieces'
     : targets.length === 0
       ? 'Nothing selected'
-      : `${selectedPieceCount} piece${selectedPieceCount !== 1 ? 's' : ''}, ${selectedActionCount} action${selectedActionCount !== 1 ? 's' : ''}`;
+      : `${selectedPieceCount} piece${selectedPieceCount !== 1 ? 's' : ''}, ${selectedActionCount} test${selectedActionCount !== 1 ? 's' : ''}`;
 
   return (
     <div>
@@ -703,7 +716,7 @@ function TargetPicker({
             onChange={toggleAllPieces}
             className="accent-primary-500"
           />
-          <span className="text-sm text-gray-300 font-medium">All pieces &amp; actions</span>
+          <span className="text-sm text-gray-300 font-medium">All pieces (actions &amp; triggers)</span>
           <span className="ml-auto text-xs text-gray-500">{scopeDesc}</span>
         </label>
 
@@ -735,7 +748,7 @@ function TargetPicker({
                     className="text-xs text-gray-500 hover:text-gray-200 flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-gray-700"
                   >
                     <ChevronRight size={12} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
-                    {actions.length} action{actions.length !== 1 ? 's' : ''}
+                    {planCountLabel(conn.piece_name)}
                   </button>
                 )}
                 {actions.length === 0 && (
@@ -743,23 +756,33 @@ function TargetPicker({
                 )}
               </div>
 
-              {/* Action rows */}
-              {expanded && actions.map(actionName => (
-                <label
-                  key={actionName}
-                  className="flex items-center gap-2 pl-8 pr-3 py-1.5 hover:bg-gray-800/30 cursor-pointer"
-                >
-                  <input
-                    type="checkbox"
-                    checked={isActionSelected(conn.piece_name, actionName)}
-                    onChange={() => toggleAction(conn.piece_name, actionName)}
-                    className="accent-primary-500 cursor-pointer"
-                  />
-                  <span className="text-xs font-mono text-gray-400">
-                    {actionName}
-                  </span>
-                </label>
-              ))}
+              {/* Target rows (actions + triggers) */}
+              {expanded && actions.map(actionName => {
+                const isTrig = isTriggerTarget(conn.piece_name, actionName);
+                return (
+                  <label
+                    key={actionName}
+                    className="flex items-center gap-2 pl-8 pr-3 py-1.5 hover:bg-gray-800/30 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isActionSelected(conn.piece_name, actionName)}
+                      onChange={() => toggleAction(conn.piece_name, actionName)}
+                      className="accent-primary-500 cursor-pointer"
+                    />
+                    <span className="text-xs font-mono text-gray-400">
+                      {actionName}
+                    </span>
+                    {isTrig ? (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 uppercase tracking-wide">trigger</span>
+                    )
+                    : (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 uppercase tracking-wide">action</span>
+                    )
+                  }
+                  </label>
+                );
+              })}
             </div>
           );
         })}

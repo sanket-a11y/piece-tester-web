@@ -261,6 +261,7 @@ export interface TestResultRow {
   run_id: number;
   piece_name: string;
   action_name: string;
+  test_type: 'action' | 'trigger';
   status: string;
   duration_ms: number;
   flow_run_id: string | null;
@@ -272,15 +273,16 @@ export function createTestResult(r: {
   run_id: number;
   piece_name: string;
   action_name: string;
+  test_type?: 'action' | 'trigger';
   status: string;
   duration_ms: number;
   flow_run_id?: string;
   error_message?: string;
 }): TestResultRow {
   const result = getDb().run(`
-    INSERT INTO test_results (run_id, piece_name, action_name, status, duration_ms, flow_run_id, error_message)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `, [r.run_id, r.piece_name, r.action_name, r.status, r.duration_ms, r.flow_run_id ?? null, r.error_message ?? null]);
+    INSERT INTO test_results (run_id, piece_name, action_name, test_type, status, duration_ms, flow_run_id, error_message)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [r.run_id, r.piece_name, r.action_name, r.test_type ?? 'action', r.status, r.duration_ms, r.flow_run_id ?? null, r.error_message ?? null]);
   return getDb().get<TestResultRow>('SELECT * FROM test_results WHERE id = ?', [result.lastId])!;
 }
 
@@ -384,10 +386,13 @@ export function deleteSchedule(id: number): boolean {
 
 // ── Test Plans ──
 
+export type TestPlanTargetType = 'action' | 'trigger';
+
 export interface TestPlanRow {
   id: number;
   piece_name: string;
   target_action: string;
+  target_type: TestPlanTargetType; // 'action' (default) | 'trigger'
   steps: string;       // JSON array of TestPlanStep
   status: string;      // 'draft' | 'approved'
   agent_memory: string;
@@ -414,14 +419,16 @@ export function computeAutomationStatus(stepsJson: string): 'fully_automated' | 
 export function createTestPlan(p: {
   piece_name: string;
   target_action: string;
+  target_type?: TestPlanTargetType;
   steps: string;
   status?: string;
   agent_memory?: string;
 }): TestPlanRow {
   const db = getDb();
+  const targetType = p.target_type || 'action';
   return db.transaction(() => {
     const automationStatus = computeAutomationStatus(p.steps);
-    const existing = getTestPlanByAction(p.piece_name, p.target_action);
+    const existing = getTestPlanByTarget(p.piece_name, p.target_action, targetType);
     if (existing) {
       db.run(`
         UPDATE test_plans SET steps = ?, status = ?, agent_memory = ?, automation_status = ?, updated_at = datetime('now')
@@ -430,9 +437,9 @@ export function createTestPlan(p: {
       return getTestPlan(existing.id)!;
     }
     const result = db.run(`
-      INSERT INTO test_plans (piece_name, target_action, steps, status, agent_memory, automation_status)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `, [p.piece_name, p.target_action, p.steps, p.status || 'draft', p.agent_memory || '', automationStatus]);
+      INSERT INTO test_plans (piece_name, target_action, target_type, steps, status, agent_memory, automation_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [p.piece_name, p.target_action, targetType, p.steps, p.status || 'draft', p.agent_memory || '', automationStatus]);
     return getTestPlan(result.lastId)!;
   });
 }
@@ -441,11 +448,20 @@ export function getTestPlan(id: number): TestPlanRow | undefined {
   return getDb().get<TestPlanRow>('SELECT * FROM test_plans WHERE id = ?', [id]);
 }
 
-export function getTestPlanByAction(pieceName: string, targetAction: string): TestPlanRow | undefined {
+/** Look up a plan by piece + target name + target type (action vs trigger). */
+export function getTestPlanByTarget(pieceName: string, targetName: string, targetType: TestPlanTargetType): TestPlanRow | undefined {
   return getDb().get<TestPlanRow>(
-    'SELECT * FROM test_plans WHERE piece_name = ? AND target_action = ?',
-    [pieceName, targetAction],
+    'SELECT * FROM test_plans WHERE piece_name = ? AND target_action = ? AND target_type = ?',
+    [pieceName, targetName, targetType],
   );
+}
+
+export function getTestPlanByAction(pieceName: string, targetAction: string): TestPlanRow | undefined {
+  return getTestPlanByTarget(pieceName, targetAction, 'action');
+}
+
+export function getTestPlanByTrigger(pieceName: string, targetTrigger: string): TestPlanRow | undefined {
+  return getTestPlanByTarget(pieceName, targetTrigger, 'trigger');
 }
 
 export function listTestPlans(pieceName?: string): TestPlanRow[] {

@@ -85,6 +85,19 @@ export interface AppConnection {
 
 interface SeekPage<T> { data: T[]; next: string | null; previous: string | null }
 
+/** Trigger test strategies, mirroring AP's TriggerTestStrategy enum. */
+export type TriggerTestStrategy = 'TEST_FUNCTION' | 'SIMULATION';
+
+/** A captured trigger event with its decoded payload (from GET /v1/trigger-events). */
+export interface TriggerEventWithPayload {
+  id: string;
+  flowId: string;
+  projectId: string;
+  sourceName: string;
+  payload: unknown;
+  [k: string]: unknown;
+}
+
 // ── Client ──
 
 export class ActivepiecesClient {
@@ -217,6 +230,43 @@ export class ActivepiecesClient {
       projectId: this.projectId,
       flowVersionId,
       stepName,
+    });
+    return data;
+  }
+
+  // ── Trigger testing (requires JWT token -- PrincipalType.USER) ──
+
+  /**
+   * Test a flow's trigger. Requires JWT auth (not API key).
+   *
+   * - TEST_FUNCTION (POLLING triggers): synchronously runs the trigger's `test()` hook in
+   *   the engine and returns the captured sample events as a SeekPage.
+   * - SIMULATION (WEBHOOK / APP_WEBHOOK triggers): toggles a temporary "simulate" trigger
+   *   source on/off. The first call arms the listener (returns nothing); after a real event
+   *   is captured it can be read via listTriggerEvents(); a second call (or cancelTestTrigger)
+   *   disables it.
+   */
+  async testTrigger(flowId: string, flowVersionId: string, strategy: TriggerTestStrategy): Promise<SeekPage<TriggerEventWithPayload> | undefined> {
+    const { data } = await this.jwtHttp().post<SeekPage<TriggerEventWithPayload> | undefined>('/v1/test-trigger', {
+      projectId: this.projectId,
+      flowId,
+      flowVersionId,
+      testStrategy: strategy,
+    });
+    return data;
+  }
+
+  /** Cancel an armed SIMULATION trigger source for the given flow. */
+  async cancelTestTrigger(flowId: string): Promise<void> {
+    await this.jwtHttp().delete('/v1/test-trigger', {
+      data: { projectId: this.projectId, flowId },
+    });
+  }
+
+  /** List captured trigger events for a flow (most recent first). */
+  async listTriggerEvents(flowId: string, limit = 10, cursor?: string): Promise<SeekPage<TriggerEventWithPayload>> {
+    const { data } = await this.jwtHttp().get<SeekPage<TriggerEventWithPayload>>('/v1/trigger-events', {
+      params: { projectId: this.projectId, flowId, limit, cursor },
     });
     return data;
   }

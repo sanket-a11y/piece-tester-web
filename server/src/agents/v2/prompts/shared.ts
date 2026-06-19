@@ -1,4 +1,4 @@
-import type { PieceMetadataFull, PieceActionMeta } from '../../../services/ap-client.js';
+import type { PieceMetadataFull, PieceActionMeta, PieceTriggerMeta } from '../../../services/ap-client.js';
 import { formatLessonsForPrompt } from '../../../services/lesson-extractor.js';
 import { getConnectionByPiece } from '../../../db/queries.js';
 
@@ -64,6 +64,72 @@ export function buildActionsList(piece: PieceMetadataFull): string {
   return lines.join('\n');
 }
 
+/** Build a context block describing the piece and the trigger under test. */
+export function buildTriggerContext(piece: PieceMetadataFull, triggerName: string): string {
+  const trigger = piece.triggers[triggerName];
+  const connRow = getConnectionByPiece(piece.name);
+  const connected = connRow ? 'Connected' : 'Not connected';
+  const connType = connRow?.connection_type || 'unknown';
+
+  const lines = [
+    `**Piece:** ${piece.displayName} (${piece.name}) v${piece.version}`,
+    `**Trigger:** ${trigger?.displayName || triggerName} (${triggerName})`,
+    `**Strategy:** ${trigger?.type || 'UNKNOWN'}`,
+    `**Description:** ${trigger?.description || 'No description'}`,
+    `**Auth:** ${piece.auth?.type || 'None'}`,
+    `**Connection:** ${connected} (${connType})`,
+  ];
+
+  return lines.join('\n');
+}
+
+/** Build a detailed property listing for one trigger. */
+export function buildTriggerProperties(trigger: PieceTriggerMeta, triggerName: string): string {
+  const lines: string[] = [];
+  lines.push(`## Properties for "${trigger.displayName}" (${triggerName}):`);
+
+  const props = trigger.props || {};
+  if (Object.keys(props).length === 0) {
+    lines.push('  (no input properties)');
+    return lines.join('\n');
+  }
+
+  for (const [propName, propDef] of Object.entries(props)) {
+    const prop = propDef as any;
+    const propType = prop.type ?? 'UNKNOWN';
+    if (AUTH_PROP_TYPES.includes(propType) || SKIP_PROP_TYPES.includes(propType)) continue;
+
+    const req = prop.required ? ' [REQUIRED]' : ' [optional]';
+    const def = prop.defaultValue !== undefined ? ` (default: ${JSON.stringify(prop.defaultValue)})` : '';
+    lines.push(`\n### ${propName} (${prop.displayName || propName})`);
+    lines.push(`  Type: ${propType}${req}${def}`);
+    if (prop.description) lines.push(`  Description: ${prop.description}`);
+    if (propType === 'STATIC_DROPDOWN' && prop.options?.options) {
+      lines.push(`  Options: ${prop.options.options.slice(0, 15).map((o: any) => `"${o.label}"=${JSON.stringify(o.value)}`).join(', ')}`);
+    }
+    if (propType === 'DROPDOWN' || propType === 'MULTI_SELECT_DROPDOWN') {
+      lines.push(`  ⚠ DYNAMIC DROPDOWN -- fetch source code to understand valid values`);
+      if (prop.refreshers) lines.push(`  Depends on: ${JSON.stringify(prop.refreshers)}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/** Build a compact trigger listing (name + display name + strategy). */
+export function buildTriggersList(piece: PieceMetadataFull): string {
+  const lines = ['## All triggers in this piece:'];
+  const triggers = piece.triggers || {};
+  if (Object.keys(triggers).length === 0) {
+    lines.push('  (none)');
+    return lines.join('\n');
+  }
+  for (const [n, trig] of Object.entries(triggers)) {
+    lines.push(`  - ${n}: "${trig.displayName}" [${trig.type || 'UNKNOWN'}]`);
+  }
+  return lines.join('\n');
+}
+
 /** Inject learned lessons for a piece (if any). */
 export function buildLessonsBlock(pieceName: string): string {
   return formatLessonsForPrompt(pieceName) || '';
@@ -112,7 +178,13 @@ Example for "Add reaction to message":
   - input: { "reaction": "thumbsup" }
   - inputMapping: { "messageTimestamp": "\${steps.step_1.output.ts}", "channel": "\${steps.step_1.output.channel}" }
 
-The executor resolves inputMapping at runtime, so step 2 always gets the FRESH value from step 1.`;
+The executor resolves inputMapping at runtime, so step 2 always gets the FRESH value from step 1.
+
+NESTED FIELDS — use a dotted key to target a field INSIDE an object value:
+- To set { "variables": { "id": <ref> } }, map the key "variables.id", NOT "variables".
+- Example (GraphQL): input { "query": "mutation($id: String!){ issueDelete(id:$id){ success } }", "variables": {} }
+  inputMapping { "variables.id": "\${steps.step_1.output.issue.id}" }
+- Mapping the whole object key (e.g. "variables") to a single scalar id is WRONG — it sets variables to a string and the inner field stays missing.`;
 
 /** Rule against custom HTTP actions. */
 export const NO_CUSTOM_HTTP_RULE = `## CRITICAL: Never Use Custom HTTP/API Calls in Plans
