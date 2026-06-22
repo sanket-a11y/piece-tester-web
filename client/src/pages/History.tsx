@@ -17,7 +17,10 @@ export default function History() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold">Test Logs</h2>
+        <div>
+          <h2 className="text-2xl font-bold">Test Logs</h2>
+          <p className="text-sm text-gray-500 mt-1">Every test run — manual and scheduled.</p>
+        </div>
       </div>
 
       {/* Tab bar */}
