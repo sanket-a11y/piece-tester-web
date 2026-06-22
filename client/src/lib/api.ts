@@ -245,6 +245,16 @@ function streamAiFix(
 
 // ── Test Plan types ──
 
+export type AssertionOp = 'exists' | 'not_empty' | 'equals' | 'contains' | 'matches' | 'gt' | 'lt' | 'type';
+
+/** An authored output assertion (the oracle) checked against a step's output. */
+export interface PlanAssertion {
+  path: string;
+  op: AssertionOp;
+  value?: unknown;
+  description?: string;
+}
+
 export interface TestPlanStep {
   id: string;
   type: 'setup' | 'test' | 'verify' | 'cleanup' | 'human_input' | 'trigger_arm' | 'trigger_test';
@@ -263,6 +273,8 @@ export interface TestPlanStep {
   triggerName?: string;
   /** For kind='trigger': how to test it. */
   triggerStrategy?: 'TEST_FUNCTION' | 'SIMULATION';
+  /** Output assertions (the oracle) checked against this step's output after it runs. */
+  assertions?: PlanAssertion[];
 }
 
 export interface TestPlan {
@@ -286,16 +298,32 @@ export interface TestPlanExportBundle {
   plans: TestPlan[];
 }
 
+export type ErrorCategory = 'auth' | 'rate_limit' | 'transient' | 'bad_request' | 'not_found' | 'piece_error' | 'unknown';
+
+/** The evaluated result of one output assertion against a step's output. */
+export interface AssertionResult {
+  path: string;
+  op: string;
+  expected?: unknown;
+  actual?: unknown;
+  passed: boolean;
+  description?: string;
+}
+
 export interface StepResult {
   stepId: string;
   label?: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'waiting';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'assert_failed' | 'skipped' | 'waiting';
   output: unknown;
   error: string | null;
   duration_ms: number;
   humanResponse?: string;
   /** Live progress log lines (e.g. webhook subscribe/receive during trigger steps). */
   logs?: string[];
+  /** Evaluated output assertions (the oracle). Present when the step defined assertions. */
+  assertions?: AssertionResult[];
+  /** For `failed` (threw) steps: deterministic classification of the error. */
+  errorCategory?: ErrorCategory;
 }
 
 export interface PlanProgress {

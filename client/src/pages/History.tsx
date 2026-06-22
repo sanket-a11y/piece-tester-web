@@ -5,7 +5,7 @@ import TestResultBadge from '../components/TestResultBadge';
 import {
   ChevronDown, ChevronRight, Clock, CheckCircle, XCircle,
   Loader2, SkipForward, MessageSquare, Play, Calendar,
-  Filter, RefreshCw, Trash2,
+  Filter, RefreshCw, Trash2, Archive, Info,
 } from 'lucide-react';
 
 type TabId = 'plan-runs' | 'legacy-runs';
@@ -17,14 +17,17 @@ export default function History() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold">Test Logs</h2>
+        <div>
+          <h2 className="text-2xl font-bold">Test Logs</h2>
+          <p className="text-sm text-gray-500 mt-1">Every test run — manual and scheduled.</p>
+        </div>
       </div>
 
       {/* Tab bar */}
       <div className="flex items-center gap-1 mb-4 border-b border-gray-800 pb-1">
         {([
           { id: 'plan-runs' as TabId, label: 'Plan Runs', icon: Play },
-          { id: 'legacy-runs' as TabId, label: 'Legacy Runs', icon: Clock },
+          { id: 'legacy-runs' as TabId, label: 'Archived Runs (v1)', icon: Archive },
         ]).map(t => (
           <button
             key={t.id}
@@ -421,6 +424,17 @@ function LegacyRunHistory({ pieceFilter }: { pieceFilter: string }) {
 
   return (
     <div className="space-y-2">
+      {/* Explainer: what these archived runs are and why they're not in Reports */}
+      <div className="flex items-start gap-2 text-xs text-gray-400 bg-gray-900 border border-gray-800 rounded-lg px-3 py-2">
+        <Info size={13} className="text-gray-500 mt-0.5 shrink-0" />
+        <span>
+          Archived results from the old single-action <span className="text-gray-300">Test Runner</span>.
+          These are <span className="text-gray-300">not</span> included in Reports or AI Analysis.
+          New testing uses <span className="text-gray-300">Plan Runs</span> — created from a piece's{' '}
+          <span className="text-gray-300">AI Test</span> or Batch Setup — which feed Reports.
+        </span>
+      </div>
+
       {/* Controls row */}
       <div className="flex items-center mb-2">
         <span className="text-sm text-gray-500">{total} run{total !== 1 ? 's' : ''}</span>
@@ -464,7 +478,7 @@ function LegacyRunHistory({ pieceFilter }: { pieceFilter: string }) {
       </div>
 
       {total === 0 && (
-        <p className="text-gray-500">No legacy test runs. These are from the old single-action test runner.</p>
+        <p className="text-gray-500">No archived runs. These come from the old single-action Test Runner.</p>
       )}
 
       {(runs || []).map((run: any) => (

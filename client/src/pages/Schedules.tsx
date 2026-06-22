@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, PlanRunRecord, StepResult } from '../lib/api';
 import TestResultBadge from '../components/TestResultBadge';
@@ -6,7 +7,7 @@ import {
   Plus, Trash2, Pencil, Clock, CheckCircle, XCircle,
   Power, PowerOff, CalendarClock, ScrollText, RefreshCw,
   ChevronDown, ChevronRight, Loader2, SkipForward, MessageSquare,
-  Calendar, Play,
+  Calendar, Play, Filter, Archive,
 } from 'lucide-react';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -84,6 +85,58 @@ function formatDateTime(iso: string): string {
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
   } catch { return iso; }
+}
+
+// Treat the naive-UTC `started_at` ("2026-06-22 08:48:37") as UTC so durations
+// aren't skewed by the local offset; `completed_at` is already ISO-UTC ("...Z").
+function parseTs(s?: string | null): number {
+  if (!s) return NaN;
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) return new Date(s).getTime();
+  return new Date(s.replace(' ', 'T') + 'Z').getTime();
+}
+
+function runDurationSec(run: PlanRunRecord): number | null {
+  if (!run.completed_at) return null;
+  const d = Math.round((parseTs(run.completed_at) - parseTs(run.started_at)) / 1000);
+  return Number.isFinite(d) && d >= 0 ? d : null;
+}
+
+function safeParseSteps(s: string): StepResult[] {
+  try { return JSON.parse(s) as StepResult[]; } catch { return []; }
+}
+
+/** Collapse a (often huge JSON) error into a one-line readable snippet. */
+function shortError(err: string): string {
+  let msg = err;
+  try { const o = JSON.parse(err); if (o && typeof o.message === 'string') msg = o.message; } catch { /* not JSON */ }
+  msg = msg.split('\n')[0].trim();
+  return msg.length > 130 ? msg.slice(0, 130) + '…' : msg;
+}
+
+function firstFailedStepError(run: PlanRunRecord): string | null {
+  const steps: StepResult[] = Array.isArray(run.step_results)
+    ? run.step_results
+    : (typeof run.step_results === 'string' ? safeParseSteps(run.step_results as any) : []);
+  const s = steps.find(x => x.status === 'failed');
+  return s?.error ? shortError(s.error) : null;
+}
+
+interface Wave { key: string; startTs: string; runs: PlanRunRecord[]; }
+
+// A scheduled cron fire produces many runs close together. Cluster them into
+// "waves": a new wave starts when there's a >10min idle gap between consecutive runs.
+function clusterWaves(runs: PlanRunRecord[]): Wave[] {
+  const sorted = [...runs].sort((a, b) => parseTs(b.started_at) - parseTs(a.started_at));
+  const GAP_MS = 10 * 60 * 1000;
+  const waves: Wave[] = [];
+  let cur: Wave | null = null;
+  for (const r of sorted) {
+    const fits = cur && (parseTs(cur.startTs) - parseTs(r.started_at)) <= GAP_MS;
+    if (!fits) { cur = { key: `w-${r.id}`, startTs: r.started_at, runs: [] }; waves.push(cur); }
+    cur!.runs.push(r);
+    cur!.startTs = r.started_at; // sorted desc → oldest-so-far = the fire time
+  }
+  return waves;
 }
 
 // ── Target type ────────────────────────────────────────────────────────────
@@ -270,7 +323,7 @@ export default function Schedules() {
       <div className="flex border-b border-gray-800 mb-6">
         {([
           { id: 'schedules', label: 'Schedules', icon: CalendarClock },
-          { id: 'logs',      label: 'Run Logs',  icon: ScrollText },
+          { id: 'logs',      label: 'Scheduled Runs',  icon: ScrollText },
         ] as { id: Tab; label: string; icon: any }[]).map(({ id, label, icon: Icon }) => (
           <button
             key={id}
@@ -385,33 +438,39 @@ export default function Schedules() {
       {/* ══════════════ TAB: RUN LOGS ══════════════ */}
       {tab === 'logs' && (
         <div className="space-y-8">
-          {/* Refresh button */}
-          <div className="flex justify-end">
+          {/* What this tab is, vs the global Test Logs page */}
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-xs text-gray-500 max-w-2xl">
+              History of runs triggered by your <span className="text-gray-300">schedules</span>.
+              For <span className="text-gray-300">all</span> test runs — including manual tests you start
+              from a piece — see{' '}
+              <Link to="/history" className="text-primary-400 hover:underline">Test Logs</Link>.
+            </p>
             <button
               onClick={() => { refetchHistory(); refetchPlanRuns(); }}
               disabled={fetchingHistory || fetchingPlanRuns}
-              className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm text-gray-400 disabled:opacity-50"
+              className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm text-gray-400 disabled:opacity-50 shrink-0"
             >
               <RefreshCw size={14} className={fetchingHistory || fetchingPlanRuns ? 'animate-spin' : ''} />
               Refresh
             </button>
           </div>
 
-              {/* ── Scheduled Plan Runs ── */}
+              {/* ── Plan Runs (scheduled) ── */}
           <section>
             <h3 className="text-base font-semibold mb-3 flex items-center gap-2">
               <CalendarClock size={16} className="text-primary-400" />
-              Scheduled Plan Runs
+              Plan Runs
               <span className="text-xs font-normal text-gray-500 ml-1">({scheduledPlanRuns.length})</span>
             </h3>
             <ExpandablePlanRuns runs={scheduledPlanRuns} />
           </section>
 
-          {/* ── Scheduled Test Runs (legacy) ── */}
+          {/* ── Archived legacy runs (scheduled) ── */}
           <section>
             <h3 className="text-base font-semibold mb-3 flex items-center gap-2">
-              <ScrollText size={16} className="text-blue-400" />
-              Scheduled Test Runs
+              <Archive size={16} className="text-blue-400" />
+              Archived Runs (v1)
               <span className="text-xs font-normal text-gray-500 ml-1">({scheduledHistory.length})</span>
             </h3>
             <ExpandableLegacyRuns runs={scheduledHistory} />
@@ -796,7 +855,9 @@ function TargetPicker({
 // ══════════════════════════════════════════════════════════════
 
 function ExpandablePlanRuns({ runs }: { runs: PlanRunRecord[] }) {
-  const [expanded, setExpanded] = useState<number | null>(null);
+  const [failedOnly, setFailedOnly] = useState(false);
+  const [expandedWave, setExpandedWave] = useState<string | null>(null); // null = default(first open), '__none__' = all closed
+  const [expandedRun, setExpandedRun] = useState<number | null>(null);
 
   if (runs.length === 0) {
     return (
@@ -806,16 +867,111 @@ function ExpandablePlanRuns({ runs }: { runs: PlanRunRecord[] }) {
     );
   }
 
+  const total = runs.length;
+  const passed = runs.filter(r => r.status === 'completed').length;
+  const failed = runs.filter(r => r.status === 'failed').length;
+  const running = runs.filter(r => r.status === 'running').length;
+
+  const view = failedOnly ? runs.filter(r => r.status === 'failed') : runs;
+  const waves = clusterWaves(view);
+
+  // Most recent wave is open by default; '__none__' means the user closed it.
+  const openKey = expandedWave === null ? (waves[0]?.key ?? null)
+    : expandedWave === '__none__' ? null
+    : expandedWave;
+  const toggleWave = (key: string) => setExpandedWave(openKey === key ? '__none__' : key);
+
   return (
-    <div className="space-y-2">
-      {runs.map(r => (
-        <PlanRunCard
-          key={r.id}
-          run={r}
-          expanded={expanded === r.id}
-          onToggle={() => setExpanded(expanded === r.id ? null : r.id)}
-        />
-      ))}
+    <div className="space-y-3">
+      {/* Summary + filter */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+        <span className="text-gray-400">{total} runs</span>
+        <span className="text-green-400">{passed} passed</span>
+        <span className="text-red-400">{failed} failed</span>
+        {running > 0 && <span className="text-blue-400">{running} running</span>}
+        <button
+          onClick={() => setFailedOnly(v => !v)}
+          className={`ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded border transition-colors ${
+            failedOnly ? 'border-red-500/50 text-red-400 bg-red-500/10' : 'border-gray-700 text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Filter size={11} /> Failed only
+        </button>
+      </div>
+
+      {waves.length === 0 ? (
+        <p className="text-sm text-gray-500 bg-gray-900 border border-gray-800 rounded-lg p-4">
+          {failedOnly ? 'No failed runs in this view. 🎉' : 'No runs to show.'}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {waves.map(wave => (
+            <WaveGroup
+              key={wave.key}
+              wave={wave}
+              open={openKey === wave.key}
+              onToggle={() => toggleWave(wave.key)}
+              expandedRun={expandedRun}
+              onToggleRun={(id) => setExpandedRun(expandedRun === id ? null : id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One collapsible group per schedule fire ("wave"): summary on the header,
+// the individual runs inside.
+function WaveGroup({ wave, open, onToggle, expandedRun, onToggleRun }: {
+  wave: Wave;
+  open: boolean;
+  onToggle: () => void;
+  expandedRun: number | null;
+  onToggleRun: (id: number) => void;
+}) {
+  const total = wave.runs.length;
+  const passed = wave.runs.filter(r => r.status === 'completed').length;
+  const failed = wave.runs.filter(r => r.status === 'failed').length;
+  const running = wave.runs.filter(r => r.status === 'running').length;
+
+  const icon = running > 0 ? <Loader2 size={14} className="text-blue-400 animate-spin" />
+    : failed > 0 ? <XCircle size={14} className="text-red-400" />
+    : <CheckCircle size={14} className="text-green-400" />;
+  const border = failed > 0 ? 'border-red-500/20' : running > 0 ? 'border-blue-500/20' : 'border-gray-800';
+
+  return (
+    <div className={`border rounded-lg ${border} bg-gray-900/60 overflow-hidden`}>
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-gray-800/40 transition-colors"
+      >
+        {open ? <ChevronDown size={14} className="text-gray-500" /> : <ChevronRight size={14} className="text-gray-500" />}
+        {icon}
+        <span className="text-sm font-medium text-gray-200">{formatDateTime(wave.startTs)}</span>
+        <span className="flex items-center gap-1 text-[10px] text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
+          <Calendar size={10} className="text-purple-400" /> scheduled
+        </span>
+        <div className="flex-1" />
+        <div className="flex items-center gap-3 text-xs">
+          <span className={failed > 0 ? 'text-gray-400' : 'text-green-400'}>{passed}/{total} passed</span>
+          {failed > 0 && <span className="text-red-400 font-medium">{failed} failed</span>}
+          {running > 0 && <span className="text-blue-400">{running} running</span>}
+        </div>
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-800/50 px-2 py-2 space-y-1.5 bg-gray-950/30">
+          {wave.runs.map(run => (
+            <PlanRunCard
+              key={run.id}
+              run={run}
+              expanded={expandedRun === run.id}
+              onToggle={() => onToggleRun(run.id)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -828,9 +984,7 @@ function PlanRunCard({ run, expanded, onToggle }: { run: PlanRunRecord; expanded
   const stepsCompleted = stepResults.filter(s => s.status === 'completed').length;
   const stepsFailed    = stepResults.filter(s => s.status === 'failed').length;
   const totalSteps     = stepResults.length;
-  const duration = run.completed_at
-    ? Math.round((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000)
-    : null;
+  const duration = runDurationSec(run);
 
   const statusBorder = run.status === 'completed' ? 'border-green-500/20'
     : run.status === 'failed' ? 'border-red-500/20'
@@ -882,6 +1036,16 @@ function PlanRunCard({ run, expanded, onToggle }: { run: PlanRunRecord; expanded
 
         {expanded ? <ChevronDown size={14} className="text-gray-500 flex-shrink-0" /> : <ChevronRight size={14} className="text-gray-500 flex-shrink-0" />}
       </button>
+
+      {run.status === 'failed' && !expanded && (() => {
+        const reason = firstFailedStepError(run);
+        return reason ? (
+          <div className="px-4 pb-2.5 -mt-1 ml-7 flex items-start gap-1.5 text-[11px] text-red-300/80">
+            <span className="text-red-500 shrink-0">└</span>
+            <span className="font-mono break-all">{reason}</span>
+          </div>
+        ) : null;
+      })()}
 
       {expanded && (
         <div className="border-t border-gray-800/50 px-4 py-3 space-y-1">

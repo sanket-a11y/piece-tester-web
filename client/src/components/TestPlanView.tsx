@@ -3,6 +3,7 @@ import {
   api,
   type TestPlanStep, type TestPlan, type StepResult, type PlanProgress,
   type AgentLogEntry, type PlanStreamCallbacks,
+  type PlanAssertion, type AssertionResult, type AssertionOp,
 } from '../lib/api';
 import {
   Play, Loader2, Brain, Check, X, ChevronDown, ChevronRight,
@@ -24,13 +25,204 @@ const STEP_TYPE_CONFIG: Record<string, { label: string; color: string; bg: strin
 };
 
 const STEP_STATUS_ICON: Record<string, JSX.Element> = {
-  pending:   <Clock size={14} className="text-gray-500" />,
-  running:   <Loader2 size={14} className="text-blue-400 animate-spin" />,
-  completed: <CheckCircle size={14} className="text-green-400" />,
-  failed:    <XCircle size={14} className="text-red-400" />,
-  skipped:   <X size={14} className="text-gray-600" />,
-  waiting:   <Pause size={14} className="text-yellow-400" />,
+  pending:       <Clock size={14} className="text-gray-500" />,
+  running:       <Loader2 size={14} className="text-blue-400 animate-spin" />,
+  completed:     <CheckCircle size={14} className="text-green-400" />,
+  failed:        <XCircle size={14} className="text-red-400" />,
+  assert_failed: <AlertTriangle size={14} className="text-amber-400" />,
+  skipped:       <X size={14} className="text-gray-600" />,
+  waiting:       <Pause size={14} className="text-yellow-400" />,
 };
+
+// ── Assertions (the oracle) UI ──
+
+const ASSERTION_OPS: { value: AssertionOp; label: string; needsValue: boolean }[] = [
+  { value: 'exists',    label: 'exists',          needsValue: false },
+  { value: 'not_empty', label: 'not empty',       needsValue: false },
+  { value: 'equals',    label: 'equals',          needsValue: true },
+  { value: 'contains',  label: 'contains',        needsValue: true },
+  { value: 'matches',   label: 'matches /regex/', needsValue: true },
+  { value: 'gt',        label: '> (number)',      needsValue: true },
+  { value: 'lt',        label: '< (number)',      needsValue: true },
+  { value: 'type',      label: 'type is',         needsValue: true },
+];
+
+// Deterministic error categories — amber = not the piece's fault, red = likely is.
+const ERROR_CATEGORY_LABELS: Record<string, { label: string; cls: string }> = {
+  auth:        { label: 'Auth / token',  cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  rate_limit:  { label: 'Rate limited',  cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  transient:   { label: 'Transient',     cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  bad_request: { label: 'Bad input',     cls: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+  not_found:   { label: 'Not found',     cls: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+  piece_error: { label: 'Piece error',   cls: 'bg-red-500/15 text-red-300 border-red-500/30' },
+  unknown:     { label: 'Unknown',       cls: 'bg-gray-600/30 text-gray-300 border-gray-600/40' },
+};
+
+function fmtVal(v: unknown): string {
+  if (v === undefined) return 'undefined';
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+/** Parse a raw editor string into an assertion operand: JSON if it parses, else the raw string. */
+function parseAssertionValue(raw: string): unknown {
+  if (raw === '') return '';
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
+/**
+ * Collect dotted leaf paths from a value, for the assertion path picker.
+ * Arrays expose their first element as `.0` so you can target `data.0.id`.
+ * Mirrors the server-side path collector so the picker matches the true output root.
+ */
+function collectLeafPaths(obj: unknown, prefix = '', depth = 5): string[] {
+  if (depth <= 0 || obj === null || obj === undefined || typeof obj !== 'object') {
+    return prefix ? [prefix] : [];
+  }
+  if (Array.isArray(obj)) {
+    if (obj.length === 0) return prefix ? [prefix] : [];
+    const idxPrefix = prefix ? `${prefix}.0` : '0';
+    const first = obj[0];
+    return (first !== null && typeof first === 'object') ? collectLeafPaths(first, idxPrefix, depth - 1) : [idxPrefix];
+  }
+  const out: string[] = [];
+  for (const key of Object.keys(obj as Record<string, unknown>).slice(0, 60)) {
+    const full = prefix ? `${prefix}.${key}` : key;
+    const child = (obj as Record<string, unknown>)[key];
+    if (child !== null && typeof child === 'object' && depth > 1) out.push(...collectLeafPaths(child, full, depth - 1));
+    else out.push(full);
+  }
+  return out;
+}
+
+/** Renders evaluated assertion results (after a run), or the defined assertions (before). */
+function AssertionResultsView({ results, defined }: { results?: AssertionResult[]; defined?: PlanAssertion[] }) {
+  if (results && results.length > 0) {
+    return (
+      <div>
+        <span className="text-gray-400 font-medium">Assertions (oracle):</span>
+        <div className="mt-1 space-y-1">
+          {results.map((r, i) => (
+            <div key={i} className={`flex items-start gap-2 rounded p-1.5 border text-[11px] ${
+              r.passed ? 'bg-green-500/5 border-green-500/20' : 'bg-amber-500/10 border-amber-500/30'
+            }`}>
+              {r.passed
+                ? <Check size={12} className="text-green-400 mt-0.5 flex-shrink-0" />
+                : <X size={12} className="text-amber-400 mt-0.5 flex-shrink-0" />}
+              <div className="min-w-0">
+                <code className="text-gray-300">
+                  {r.path || 'output'} {r.op}{r.expected !== undefined ? ` ${fmtVal(r.expected)}` : ''}
+                </code>
+                {!r.passed && (
+                  <div className="text-amber-300/80 font-mono break-all">got: {fmtVal(r.actual).slice(0, 140)}</div>
+                )}
+                {r.description && <div className="text-gray-500">{r.description}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (defined && defined.length > 0) {
+    return (
+      <div>
+        <span className="text-gray-400 font-medium">Assertions (oracle):</span>
+        <div className="mt-1 space-y-1">
+          {defined.map((a, i) => (
+            <div key={i} className="flex items-center gap-2 text-[11px] text-gray-400">
+              <Shield size={11} className="text-gray-500 flex-shrink-0" />
+              <code className="text-gray-400">{a.path || 'output'} {a.op}{a.value !== undefined ? ` ${fmtVal(a.value)}` : ''}</code>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
+
+/** Inline editor for a step's output assertions (the human-authored oracle). */
+function AssertionsEditor({ assertions, availablePaths, onChange }: {
+  assertions?: PlanAssertion[];
+  /** Dotted paths detected in the step's last-run output, for the path picker. */
+  availablePaths: string[];
+  onChange: (a: PlanAssertion[]) => void;
+}) {
+  const list = assertions || [];
+  const update = (i: number, patch: Partial<PlanAssertion>) => onChange(list.map((a, idx) => idx === i ? { ...a, ...patch } : a));
+  const remove = (i: number) => onChange(list.filter((_, idx) => idx !== i));
+  const add = () => onChange([...list, { path: '', op: 'exists' }]);
+  const hasPaths = availablePaths.length > 0;
+  return (
+    <div>
+      <div className="flex items-center justify-between">
+        <span className="text-gray-500 font-medium">Assertions (oracle):</span>
+        <button onClick={(e) => { e.stopPropagation(); add(); }} className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1">
+          <Plus size={10} /> Add assertion
+        </button>
+      </div>
+      {list.length === 0 && (
+        <p className="text-[10px] text-gray-600 mt-1">No assertions — this step passes if it merely runs without error. Add one to check the output is actually correct.</p>
+      )}
+      {list.length > 0 && (
+        <p className="text-[10px] text-gray-600 mt-1">
+          {hasPaths ? 'Use the ⌄ menu to pick a field from the last run’s output.' : 'Run the plan once to pick fields from the output, or type a dot-path (empty = whole output).'}
+        </p>
+      )}
+      <div className="mt-1 space-y-1">
+        {list.map((a, i) => {
+          const opMeta = ASSERTION_OPS.find(o => o.value === a.op);
+          return (
+            <div key={i} className="flex items-center gap-1">
+              <div className="flex-1 min-w-0 flex items-center gap-1">
+                <input
+                  className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 font-mono"
+                  placeholder='path (e.g. id) — empty = whole output'
+                  value={a.path}
+                  onChange={(e) => update(i, { path: e.target.value })}
+                />
+                {hasPaths && (
+                  <select
+                    title="Pick a field detected in the last run's output"
+                    className="bg-gray-800 border border-gray-700 rounded px-0.5 py-1 text-[11px] text-gray-400 flex-shrink-0"
+                    value=""
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '') return;
+                      update(i, { path: v === ' root' ? '' : v });
+                    }}
+                  >
+                    <option value="">⌄</option>
+                    <option value={' root'}>(whole output)</option>
+                    {availablePaths.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                )}
+              </div>
+              <select
+                className="bg-gray-800 border border-gray-700 rounded px-1 py-1 text-[11px] text-gray-200 flex-shrink-0"
+                value={a.op}
+                onChange={(e) => update(i, { op: e.target.value as AssertionOp })}
+              >
+                {ASSERTION_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              {opMeta?.needsValue && (
+                <input
+                  className="w-24 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 font-mono"
+                  placeholder="value"
+                  value={a.value === undefined ? '' : typeof a.value === 'string' ? a.value : JSON.stringify(a.value)}
+                  onChange={(e) => update(i, { value: parseAssertionValue(e.target.value) })}
+                />
+              )}
+              <button onClick={(e) => { e.stopPropagation(); remove(i); }} className="text-red-400 hover:text-red-300 flex-shrink-0">
+                <Trash2 size={11} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 // ══════════════════════════════════════════════════════════════
 // Main Component
@@ -658,6 +850,7 @@ export default function TestPlanView({
               <div key={step.id} className={`rounded-lg border ${
                 isPaused ? 'border-yellow-500/50 bg-yellow-500/5' :
                 sr?.status === 'failed' ? 'border-red-500/30 bg-red-500/5' :
+                sr?.status === 'assert_failed' ? 'border-amber-500/40 bg-amber-500/5' :
                 sr?.status === 'completed' ? 'border-green-500/20 bg-green-500/5' :
                 sr?.status === 'running' ? 'border-blue-500/30 bg-blue-500/5' :
                 'border-gray-800 bg-gray-900'
@@ -915,21 +1108,40 @@ export default function TestPlanView({
                       </div>
                     )}
 
-                    {/* Step result output */}
-                    {sr?.output != null && sr.status === 'completed' && (
+                    {/* Step result output (shown for a clean pass AND an assertion failure) */}
+                    {sr?.output != null && (sr.status === 'completed' || sr.status === 'assert_failed') && (
                       <div>
-                        <span className="text-green-500 font-medium">Output:</span>
-                        <pre className="mt-1 bg-gray-800/50 rounded p-2 overflow-x-auto text-green-300/80 font-mono max-h-40 overflow-y-auto">
+                        <span className={`font-medium ${sr.status === 'assert_failed' ? 'text-amber-400' : 'text-green-500'}`}>Output:</span>
+                        <pre className={`mt-1 bg-gray-800/50 rounded p-2 overflow-x-auto font-mono max-h-40 overflow-y-auto ${
+                          sr.status === 'assert_failed' ? 'text-amber-200/80' : 'text-green-300/80'
+                        }`}>
                           {typeof sr.output === 'string' ? sr.output : String(JSON.stringify(sr.output, null, 2))}
                         </pre>
                       </div>
                     )}
 
-                    {/* Step error */}
-                    {sr?.error && (
+                    {/* Output assertions (the oracle) — results after a run, or the defined checks before */}
+                    {!editMode && <AssertionResultsView results={sr?.assertions} defined={step.assertions} />}
+
+                    {/* Step error (thrown). For assert_failed the amber assertion list above tells the story. */}
+                    {sr?.error && sr.status !== 'assert_failed' && (
                       <div className="bg-red-500/10 border border-red-500/20 rounded p-2 text-red-300 font-mono">
+                        {sr.errorCategory && (
+                          <span className={`inline-block mb-1 mr-2 px-1.5 py-0.5 rounded border text-[10px] font-semibold ${ERROR_CATEGORY_LABELS[sr.errorCategory]?.cls || ''}`}>
+                            {ERROR_CATEGORY_LABELS[sr.errorCategory]?.label || sr.errorCategory}
+                          </span>
+                        )}
                         {sr.error}
                       </div>
+                    )}
+
+                    {/* Assertions editor (the oracle) — author what "correct output" means */}
+                    {editMode && step.type !== 'human_input' && step.type !== 'trigger_arm' && (
+                      <AssertionsEditor
+                        assertions={step.assertions}
+                        availablePaths={sr?.output != null ? Array.from(new Set(collectLeafPaths(sr.output))).slice(0, 200) : []}
+                        onChange={(a) => patchStep(step.id, { assertions: a })}
+                      />
                     )}
 
                     {/* Edit controls */}
@@ -1071,6 +1283,7 @@ export default function TestPlanView({
                 const step = plan.steps.find(s => s.id === sr.stepId);
                 const color = sr.status === 'completed' ? 'bg-green-500/20 text-green-400 border-green-500/30'
                   : sr.status === 'failed' ? 'bg-red-500/20 text-red-400 border-red-500/30'
+                  : sr.status === 'assert_failed' ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
                   : sr.status === 'running' ? 'bg-blue-500/20 text-blue-400 border-blue-500/30 animate-pulse'
                   : sr.status === 'skipped' ? 'bg-gray-700/50 text-gray-500 border-gray-700'
                   : 'bg-gray-800 text-gray-600 border-gray-700';
@@ -1153,18 +1366,25 @@ export default function TestPlanView({
 
       {/* Execution summary */}
       {executionDone && stepResults.length > 0 && (() => {
-        const hasFailed = stepResults.some(r => r.status === 'failed');
+        const threw = stepResults.filter(r => r.status === 'failed');
+        const asserted = stepResults.filter(r => r.status === 'assert_failed');
+        const hasFailed = threw.length > 0 || asserted.length > 0;
         const allOk = stepResults.every(r => r.status === 'completed' || r.status === 'skipped');
+        const onlyAssert = asserted.length > 0 && threw.length === 0;
+        const containerCls = allOk
+          ? 'bg-green-500/10 border border-green-500/20 text-green-300'
+          : onlyAssert
+            ? 'bg-amber-500/10 border border-amber-500/30 text-amber-200'
+            : 'bg-red-500/10 border border-red-500/20 text-red-300';
         return (
-          <div className={`rounded-lg p-3 text-sm ${
-            allOk ? 'bg-green-500/10 border border-green-500/20 text-green-300'
-                  : 'bg-red-500/10 border border-red-500/20 text-red-300'
-          }`}>
+          <div className={`rounded-lg p-3 text-sm ${containerCls}`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 font-medium">
                 {allOk
-                  ? <><CheckCircle size={16} /> All steps completed</>
-                  : <><XCircle size={16} /> Plan execution failed</>}
+                  ? <><CheckCircle size={16} /> All steps passed — output assertions held</>
+                  : onlyAssert
+                    ? <><AlertTriangle size={16} /> Ran, but output didn't match expectations</>
+                    : <><XCircle size={16} /> Plan execution failed</>}
               </div>
 
               {/* Fix with AI button (not available for trigger plans yet) */}
@@ -1180,21 +1400,37 @@ export default function TestPlanView({
                 </span>
               )}
             </div>
-            <div className="flex gap-4 mt-1 text-xs">
+            <div className="flex flex-wrap gap-4 mt-1 text-xs">
               <span>Total: {stepResults.length}</span>
               <span className="text-green-400">Passed: {stepResults.filter(r => r.status === 'completed').length}</span>
-              <span className="text-red-400">Failed: {stepResults.filter(r => r.status === 'failed').length}</span>
+              {asserted.length > 0 && <span className="text-amber-300">Output mismatch: {asserted.length}</span>}
+              <span className="text-red-400">Errored: {threw.length}</span>
               <span className="text-gray-400">Skipped: {stepResults.filter(r => r.status === 'skipped').length}</span>
             </div>
 
-            {/* Failed step details */}
+            {/* Failed step details — assertion failures (amber) and thrown errors (red, with category) */}
             {hasFailed && (
               <div className="mt-2 space-y-1">
-                {stepResults.filter(r => r.status === 'failed').map(r => {
+                {asserted.map(r => {
                   const step = (plan?.steps || []).find(s => s.id === r.stepId);
+                  return (
+                    <div key={r.stepId} className="text-xs bg-amber-500/5 rounded p-2 border border-amber-500/20">
+                      <span className="font-medium text-amber-300">{step?.label || r.stepId}:</span>{' '}
+                      <span className="text-amber-200/80 font-mono">{r.error?.slice(0, 240)}</span>
+                    </div>
+                  );
+                })}
+                {threw.map(r => {
+                  const step = (plan?.steps || []).find(s => s.id === r.stepId);
+                  const cat = r.errorCategory ? ERROR_CATEGORY_LABELS[r.errorCategory] : undefined;
                   return (
                     <div key={r.stepId} className="text-xs bg-red-500/5 rounded p-2 border border-red-500/10">
                       <span className="font-medium text-red-300">{step?.label || r.stepId}:</span>{' '}
+                      {cat && (
+                        <span className={`inline-block mr-1 px-1.5 py-0.5 rounded border text-[10px] font-semibold ${cat.cls}`}>
+                          {cat.label}
+                        </span>
+                      )}
                       <span className="text-red-400/80 font-mono">{r.error?.slice(0, 200)}</span>
                     </div>
                   );

@@ -8,7 +8,7 @@ import {
   createPlanRun, getPlanRun, updatePlanRun,
   getTestPlan, type TestPlanRunRow,
 } from '../db/queries.js';
-import { executeActionOnAP, type TestPlanStep } from './ai-config-generator.js';
+import { executeActionOnAP, type TestPlanStep, type PlanAssertion } from './ai-config-generator.js';
 import {
   executeTriggerOnAP, armTriggerSimulation, captureTriggerEvents, cancelTriggerSimulation,
   type TriggerSimContext,
@@ -18,16 +18,104 @@ import type { PieceMetadataFull } from './ap-client.js';
 
 // ── Types ──
 
+/**
+ * Why a thrown step failed, classified deterministically from the error
+ * (status codes + message) — NOT by an LLM. Lets a red be read honestly:
+ * an expired token is `auth`, a 500 is `transient`, a real piece bug is
+ * `piece_error`. Only `piece_error` (and `unknown`) implicate the piece.
+ */
+export type ErrorCategory = 'auth' | 'rate_limit' | 'transient' | 'bad_request' | 'not_found' | 'piece_error' | 'unknown';
+
+/** The evaluated result of one output assertion against a step's output. */
+export interface AssertionResult {
+  path: string;
+  op: string;
+  expected?: unknown;
+  actual?: unknown;
+  passed: boolean;
+  description?: string;
+}
+
 export interface StepResult {
   stepId: string;
   label?: string;   // human-readable step label (e.g. "Create test ticket")
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'waiting';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'assert_failed' | 'skipped' | 'waiting';
   output: unknown;
   error: string | null;
   duration_ms: number;
   humanResponse?: string;
   /** Live progress log lines (e.g. webhook subscribe/receive during trigger steps). */
   logs?: string[];
+  /** Evaluated output assertions (the oracle). Present when the step defined assertions. */
+  assertions?: AssertionResult[];
+  /** For `failed` (threw) steps: deterministic classification of the error. */
+  errorCategory?: ErrorCategory;
+}
+
+// ── Assertions (the oracle) & deterministic error classification ──
+
+/** Read a dotted path out of a value. '' returns the whole value. */
+function getByPath(obj: unknown, path: string): unknown {
+  if (!path) return obj;
+  let cur: any = obj;
+  for (const part of path.split('.')) {
+    if (cur === null || cur === undefined) return undefined;
+    cur = cur[part];
+  }
+  return cur;
+}
+
+function isEmptyValue(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  if (typeof v === 'string') return v.trim() === '';
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === 'object') return Object.keys(v as object).length === 0;
+  return false;
+}
+
+function evaluateAssertion(output: unknown, a: PlanAssertion): AssertionResult {
+  const actual = getByPath(output, a.path);
+  let passed = false;
+  switch (a.op) {
+    case 'exists': passed = actual !== undefined && actual !== null; break;
+    case 'not_empty': passed = !isEmptyValue(actual); break;
+    case 'equals': passed = JSON.stringify(actual) === JSON.stringify(a.value); break;
+    case 'contains':
+      if (typeof actual === 'string') passed = actual.includes(String(a.value));
+      else if (Array.isArray(actual)) passed = actual.some(x => JSON.stringify(x) === JSON.stringify(a.value));
+      break;
+    case 'matches':
+      try { passed = typeof actual === 'string' && new RegExp(String(a.value)).test(actual); } catch { passed = false; }
+      break;
+    case 'gt': passed = typeof actual === 'number' && actual > Number(a.value); break;
+    case 'lt': passed = typeof actual === 'number' && actual < Number(a.value); break;
+    case 'type': passed = (Array.isArray(actual) ? 'array' : typeof actual) === String(a.value); break;
+    default: passed = false;
+  }
+  return { path: a.path, op: a.op, expected: a.value, actual, passed, description: a.description };
+}
+
+/** Build a one-line human summary of which assertions failed. */
+function summarizeFailedAssertions(results: AssertionResult[]): string {
+  const failed = results.filter(r => !r.passed);
+  const parts = failed.map(r => {
+    const target = r.path || 'output';
+    const exp = r.expected !== undefined ? ` ${JSON.stringify(r.expected)}` : '';
+    const got = JSON.stringify(r.actual);
+    return `${target} ${r.op}${exp} (got ${got === undefined ? 'undefined' : got.slice(0, 80)})`;
+  });
+  return `Output did not match ${failed.length} expectation${failed.length > 1 ? 's' : ''}: ${parts.join('; ')}`;
+}
+
+/** Deterministically classify a thrown step error from its message/status code. */
+function classifyError(message: string): ErrorCategory {
+  const m = (message || '').toLowerCase();
+  if (/\b(401|403)\b/.test(m) || /unauthor|forbidden|invalid token|token (is )?expired|expired token|credential|permission|access denied|not authenticated/.test(m)) return 'auth';
+  if (/\b429\b/.test(m) || /rate.?limit|too many requests|quota exceeded/.test(m)) return 'rate_limit';
+  if (/\b(500|502|503|504)\b/.test(m) || /timeout|timed out|econnreset|econnrefused|socket hang up|network error|temporarily unavailable|service unavailable|getaddrinfo|enotfound/.test(m)) return 'transient';
+  if (/\b(400|422)\b/.test(m) || /validation|invalid (input|value|parameter|param|request|body|argument)|is required|missing required|must be a|bad request/.test(m)) return 'bad_request';
+  if (/\b404\b/.test(m) || /not found|does not exist|no such/.test(m)) return 'not_found';
+  return 'piece_error';
 }
 
 export interface PlanProgress {
@@ -252,6 +340,55 @@ export async function executePlan(
     updatePlanRun(runId, { step_results: JSON.stringify(arr) });
   }
 
+  // Step types that halt the plan when they fail (thrown OR assertion failure).
+  // verify/cleanup/human_input failures do not halt.
+  const STOP_ON_FAIL_TYPES = new Set(['setup', 'test', 'trigger_arm', 'trigger_test']);
+
+  // Shared failure path: skip remaining non-cleanup steps, still run cleanup steps,
+  // mark the run failed, and emit plan_failed. Used by both thrown errors and
+  // assertion failures on a halting step.
+  async function finishWithFailure(failedStep: TestPlanStep, failedSr: StepResult, startMs: number): Promise<TestPlanRunRow> {
+    const currentIdx = steps.indexOf(failedStep);
+    for (let i = currentIdx + 1; i < steps.length; i++) {
+      const futureStep = steps[i];
+      const futureSr = stepResults.get(futureStep.id)!;
+      if (futureStep.type === 'cleanup') {
+        futureSr.status = 'running';
+        saveResults();
+        try {
+          const cleanupInput = resolveInputMapping(futureStep, stepResults);
+          const cleanupOutput = await executeStepOnAP(pieceMeta, futureStep, cleanupInput, triggerSim);
+          futureSr.status = 'completed';
+          futureSr.output = cleanupOutput;
+        } catch {
+          futureSr.status = 'failed';
+          futureSr.error = 'Cleanup failed';
+        }
+        futureSr.duration_ms = Date.now() - startMs;
+        saveResults();
+      } else {
+        futureSr.status = 'skipped';
+        saveResults();
+      }
+    }
+
+    updatePlanRun(runId, {
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+      step_results: JSON.stringify(steps.map(s => stepResults.get(s.id)!)),
+    });
+
+    onProgress({
+      type: 'plan_failed',
+      runId,
+      message: `Step "${failedStep.label}" failed: ${failedSr.error}`,
+      stepResults: steps.map(s => stepResults.get(s.id)!),
+    });
+
+    cleanupEmitter(runId);
+    return getPlanRun(runId)!;
+  }
+
   try {
     for (const step of steps) {
       // Check for abort before each step
@@ -415,22 +552,51 @@ export async function executePlan(
         // Execute the step (action via test-step, or trigger via test-trigger)
         const output = await executeStepOnAP(pieceMeta, step, resolvedInput, triggerSim, stepLog);
 
-        sr.status = 'completed';
         sr.output = output;
         sr.duration_ms = Date.now() - startMs;
-        saveResults();
 
-        onProgress({
-          type: 'step_complete',
-          runId,
-          stepId: step.id,
-          stepResult: sr,
-          stepResults: steps.map(s => stepResults.get(s.id)!),
-        });
+        // Evaluate output assertions (the oracle). A step only TRULY passes if it ran
+        // AND its assertions hold. No assertions = legacy "didn't throw" behavior.
+        const assertionResults = (step.assertions && step.assertions.length > 0)
+          ? step.assertions.map(a => evaluateAssertion(output, a))
+          : undefined;
+        if (assertionResults) sr.assertions = assertionResults;
+
+        if (assertionResults && assertionResults.some(r => !r.passed)) {
+          // Ran without error, but the output is wrong: distinct from a thrown failure.
+          sr.status = 'assert_failed';
+          sr.error = summarizeFailedAssertions(assertionResults);
+          saveResults();
+
+          onProgress({
+            type: 'step_failed',
+            runId,
+            stepId: step.id,
+            stepResult: sr,
+            stepResults: steps.map(s => stepResults.get(s.id)!),
+          });
+
+          if (STOP_ON_FAIL_TYPES.has(step.type)) {
+            return await finishWithFailure(step, sr, startMs);
+          }
+        } else {
+          sr.status = 'completed';
+          saveResults();
+
+          onProgress({
+            type: 'step_complete',
+            runId,
+            stepId: step.id,
+            stepResult: sr,
+            stepResults: steps.map(s => stepResults.get(s.id)!),
+          });
+        }
 
       } catch (err: any) {
+        const message = err.message || 'Unknown error';
         sr.status = 'failed';
-        sr.error = err.message || 'Unknown error';
+        sr.error = message;
+        sr.errorCategory = classifyError(message);
         sr.duration_ms = Date.now() - startMs;
         saveResults();
 
@@ -442,64 +608,28 @@ export async function executePlan(
           stepResults: steps.map(s => stepResults.get(s.id)!),
         });
 
-        // If a setup or test step fails, stop the plan (but still run cleanup steps)
-        if (step.type === 'setup' || step.type === 'test' || step.type === 'trigger_arm' || step.type === 'trigger_test') {
-          // Skip remaining non-cleanup steps, run cleanup steps
-          const currentIdx = steps.indexOf(step);
-          for (let i = currentIdx + 1; i < steps.length; i++) {
-            const futureStep = steps[i];
-            const futureSr = stepResults.get(futureStep.id)!;
-            if (futureStep.type === 'cleanup') {
-              // Run cleanup step
-              futureSr.status = 'running';
-              saveResults();
-              try {
-                const cleanupInput = resolveInputMapping(futureStep, stepResults);
-                const cleanupOutput = await executeStepOnAP(pieceMeta, futureStep, cleanupInput, triggerSim);
-                futureSr.status = 'completed';
-                futureSr.output = cleanupOutput;
-              } catch {
-                futureSr.status = 'failed';
-                futureSr.error = 'Cleanup failed';
-              }
-              futureSr.duration_ms = Date.now() - startMs;
-              saveResults();
-            } else {
-              futureSr.status = 'skipped';
-              saveResults();
-            }
-          }
-
-          // Plan failed
-          updatePlanRun(runId, {
-            status: 'failed',
-            completed_at: new Date().toISOString(),
-            step_results: JSON.stringify(steps.map(s => stepResults.get(s.id)!)),
-          });
-
-          onProgress({
-            type: 'plan_failed',
-            runId,
-            message: `Step "${step.label}" failed: ${sr.error}`,
-            stepResults: steps.map(s => stepResults.get(s.id)!),
-          });
-
-          cleanupEmitter(runId);
-          return getPlanRun(runId)!;
+        // If a halting step fails, stop the plan (but still run cleanup steps).
+        if (STOP_ON_FAIL_TYPES.has(step.type)) {
+          return await finishWithFailure(step, sr, startMs);
         }
       }
     }
 
-    // All steps completed
+    // All steps processed. The run is failed if any step failed or asserted-failed —
+    // including a non-halting verify/cleanup step that didn't stop the plan.
+    const anyFailed = steps.some(s => {
+      const r = stepResults.get(s.id)!;
+      return r.status === 'failed' || r.status === 'assert_failed';
+    });
     updatePlanRun(runId, {
-      status: 'completed',
+      status: anyFailed ? 'failed' : 'completed',
       completed_at: new Date().toISOString(),
       current_step_id: null,
       step_results: JSON.stringify(steps.map(s => stepResults.get(s.id)!)),
     });
 
     onProgress({
-      type: 'plan_complete',
+      type: anyFailed ? 'plan_failed' : 'plan_complete',
       runId,
       stepResults: steps.map(s => stepResults.get(s.id)!),
     });

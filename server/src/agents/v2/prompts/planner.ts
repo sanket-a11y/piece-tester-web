@@ -29,6 +29,7 @@ ${INPUT_MAPPING_DOC}
 - Use \`{{$uuid}}\` or \`{{$timestamp}}\` tokens in resource names for uniqueness.
 - AVOID requiresApproval: true -- plans run unattended on schedules.
 - The test step MUST have ALL required fields filled.
+- ALWAYS add output \`assertions\` to the test step (1-4 of them): checks on the step output that prove the piece actually did the right thing, not merely that it returned without error. A green with NO assertions only proves "didn't throw". Assert that created IDs exist (op:exists), returned lists are non_empty, and echoed fields equal the input (op:equals). Each assertion is { path, op, value? } where path is a dot-path into the output ("" = whole output).
 - Keep plans concise: typically 2-4 steps (setup + test, maybe verify/cleanup).
 - If the synthesized spec says the target action is READ-ONLY, do NOT default to setup steps.
 - For READ-ONLY target actions, prefer a single test step or read-only supporting steps.
@@ -85,6 +86,7 @@ Do NOT wrap it with {{connections.xxx}} -- pass the bare externalId.
 - Use \`{{$uuid}}\` or \`{{$timestamp}}\` tokens in resource names for uniqueness.
 - AVOID requiresApproval: true -- plans run unattended on schedules.
 - The test step MUST have ALL required fields filled.
+- ALWAYS add output \`assertions\` to the test step (1-4 of them): checks on the step output that prove the piece actually did the right thing, not merely that it returned without error. A green with NO assertions only proves "didn't throw". Assert that created IDs exist (op:exists), returned lists are non_empty, and echoed fields equal the input (op:equals). Each assertion is { path, op, value? } where path is a dot-path into the output ("" = whole output).
 - Keep plans concise: typically 2-4 steps (setup + test, maybe verify/cleanup).
 - If the synthesized spec says the target action is READ-ONLY, do NOT default to setup steps.
 - For READ-ONLY target actions, prefer a single test step or read-only supporting steps.
