@@ -33,6 +33,20 @@ export const setPlanTool: ToolDefinition = {
             },
             requiresApproval: { type: 'boolean', description: 'AVOID using this. Plans run unattended on schedules.' },
             humanPrompt: { type: 'string', description: 'Only for human_input type: the question to show the user' },
+            assertions: {
+              type: 'array' as const,
+              description: 'Output assertions (the ORACLE) for this step — checks on the step output that define what "correct" means. STRONGLY RECOMMENDED on the test / trigger_test step: without assertions a step "passes" merely by not throwing, which does NOT prove the piece behaved correctly. Add 1-4 assertions describing the expected output (e.g. the created id exists, a returned list is non-empty, an echoed field equals the input).',
+              items: {
+                type: 'object' as const,
+                properties: {
+                  path: { type: 'string', description: 'Dot-path into the step output. "" = the whole output. e.g. "id", "data.0.email", "messages.0.ts".' },
+                  op: { type: 'string', enum: ['exists', 'not_empty', 'equals', 'contains', 'matches', 'gt', 'lt', 'type'], description: 'exists=defined & non-null; not_empty=non-empty string/array/object; equals=deep-equals value; contains=string includes / array has value; matches=string matches regex value; gt/lt=numeric compare to value; type=typeof equals value ("string","number","boolean","object","array").' },
+                  value: { description: 'Expected operand for equals/contains/matches/gt/lt/type. Omit for exists/not_empty.' },
+                  description: { type: 'string', description: 'Short human-readable intent of this assertion.' },
+                },
+                required: ['path', 'op'],
+              },
+            },
           },
           required: ['id', 'type', 'label', 'description', 'actionName', 'input'],
         },
@@ -62,6 +76,11 @@ export function parsePlanFromToolInput(input: Record<string, any>): { steps: Tes
       inputMapping: s.inputMapping || {},
       requiresApproval: s.requiresApproval || false,
       humanPrompt: s.humanPrompt || undefined,
+      assertions: Array.isArray(s.assertions)
+        ? s.assertions
+            .filter((a: any) => a && typeof a.path === 'string' && typeof a.op === 'string')
+            .map((a: any) => ({ path: a.path, op: a.op, value: a.value, description: a.description }))
+        : undefined,
       ...(isTrigger ? {
         kind: 'trigger' as const,
         triggerName: s.triggerName || s.actionName || '',

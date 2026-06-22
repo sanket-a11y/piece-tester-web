@@ -45,6 +45,22 @@ export interface AiActionResult {
 
 // ── Test Plan types (shared with plan-executor) ──
 
+/**
+ * An output assertion — the "oracle" for a step. After a step runs without
+ * throwing, each assertion is checked against the step OUTPUT. A step only
+ * truly passes if all its assertions hold; otherwise it is `assert_failed`
+ * (the piece ran but behaved wrong) — distinct from `failed` (it threw).
+ */
+export interface PlanAssertion {
+  /** Dot-path into the step output. '' = the whole output. e.g. "id", "messages.0.ts". */
+  path: string;
+  op: 'exists' | 'not_empty' | 'equals' | 'contains' | 'matches' | 'gt' | 'lt' | 'type';
+  /** Expected operand for equals/contains/matches/gt/lt/type. Omitted for exists/not_empty. */
+  value?: unknown;
+  /** Human-readable intent of this assertion. */
+  description?: string;
+}
+
 export interface TestPlanStep {
   id: string;
   type: 'setup' | 'test' | 'verify' | 'cleanup' | 'human_input' | 'trigger_arm' | 'trigger_test';
@@ -66,6 +82,8 @@ export interface TestPlanStep {
   triggerName?: string;
   /** For kind==='trigger': how to test it. Phase A supports TEST_FUNCTION (polling). */
   triggerStrategy?: 'TEST_FUNCTION' | 'SIMULATION';
+  /** Output assertions (the oracle) checked against this step's output after it runs. */
+  assertions?: PlanAssertion[];
 }
 
 export interface TestPlanResult {

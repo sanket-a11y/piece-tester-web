@@ -42,6 +42,7 @@ Validate the generator choice with test_trigger_simulation (it arms, runs your g
 - If a WEBHOOK/APP_WEBHOOK trigger has NO action in this piece that can fire it (or the app can't be simulated headlessly), say so in the note and produce just a trigger_arm + trigger_test pair (capture may need a manual event) — do not invent a generator.
 - Use {{$uuid}} / {{$timestamp}} in generator resource names for uniqueness.
 - AVOID requiresApproval: true — plans run unattended on schedules.
+- ALWAYS add output \`assertions\` to the trigger_test step (1-4 of them): checks on the captured event/sample that prove a real event arrived with the expected shape (e.g. the payload id/email exists via op:exists, the items list is non_empty), not merely that capture returned. Each assertion is { path, op, value? } with path a dot-path into the trigger_test output ("" = whole output).
 - ALWAYS include agent_memory summarizing the strategy, the generator action chosen (if any), and the payload shape.
 - ALWAYS call set_test_plan at the end.
 
