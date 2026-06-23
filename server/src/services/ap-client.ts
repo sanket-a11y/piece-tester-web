@@ -342,9 +342,34 @@ export class ActivepiecesClient {
   static formatError(err: unknown): string {
     if (err instanceof AxiosError) {
       const status = err.response?.status ?? 'no status';
-      const body = typeof err.response?.data === 'object' ? JSON.stringify(err.response.data) : (err.response?.data ?? err.message);
+      const data = err.response?.data;
+      // AP wraps the underlying piece/engine error inside the response body. Surface
+      // that real error (e.g. a failing onEnable webhook registration, or a piece's
+      // own thrown message) instead of the opaque "Request failed with status code N".
+      const pieceError = ActivepiecesClient.extractApError(data);
+      if (pieceError) return pieceError;
+      const body = typeof data === 'object' ? JSON.stringify(data) : (data ?? err.message);
       return `HTTP ${status}: ${body}`;
     }
     return err instanceof Error ? err.message : String(err);
+  }
+
+  /**
+   * Pull the piece/engine error string out of an AP error response body, if present.
+   * AP throws an ActivepiecesError shaped `{ code, params }`; trigger onEnable/onDisable
+   * and other engine-hook failures put the piece's real error in `params.standardError`.
+   * Fastify validation errors instead carry a top-level `message`.
+   */
+  private static extractApError(data: unknown): string | undefined {
+    if (!data || typeof data !== 'object') return undefined;
+    const body = data as Record<string, unknown>;
+    const params = (body.params && typeof body.params === 'object')
+      ? body.params as Record<string, unknown>
+      : undefined;
+    const candidates = [params?.standardError, params?.message, params?.error, body.message];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim()) return c.trim();
+    }
+    return undefined;
   }
 }

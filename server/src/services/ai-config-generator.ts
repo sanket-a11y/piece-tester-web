@@ -593,7 +593,17 @@ export async function executeActionOnAP(pieceMeta: PieceMetadataFull, actionName
       if (['SUCCEEDED', 'FAILED', 'INTERNAL_ERROR', 'TIMEOUT'].includes(run.status)) {
         const stepResult = run.steps?.['step_1'] as any;
         if (run.status === 'SUCCEEDED') return stepResult?.output ?? { status: 'success' };
-        throw new Error(JSON.stringify({ status: run.status, errorMessage: stepResult?.errorMessage || 'Unknown error', output: stepResult?.output }));
+        // Surface the piece's own error verbatim. AP stores the thrown error in
+        // errorMessage; some pieces leave the useful detail (e.g. the upstream API's
+        // response body) in output instead. Prefer errorMessage, append output if it adds detail.
+        const errMsg = stepResult?.errorMessage ? String(stepResult.errorMessage) : '';
+        const outStr = stepResult?.output == null
+          ? ''
+          : (typeof stepResult.output === 'string' ? stepResult.output : JSON.stringify(stepResult.output));
+        const parts: string[] = [];
+        if (errMsg) parts.push(errMsg);
+        if (outStr && outStr !== '{}' && !errMsg.includes(outStr)) parts.push(outStr);
+        throw new Error(parts.join(' — ') || `Action did not succeed (run status: ${run.status}).`);
       }
       await new Promise(r => setTimeout(r, 2500));
     }
@@ -680,7 +690,7 @@ Unlike a simple config, your plan includes SETUP steps that run BEFORE the actua
 - **test**: The actual action being tested. There should be exactly ONE test step.
 - **verify**: Optional check that the test succeeded (e.g. search for created resource).
 - **cleanup**: Optional teardown (e.g. delete test resources). Run even if test fails.
-- **human_input**: Ask the user for a value you cannot determine automatically. Use sparingly.
+- **human_input**: Ask the user for a value you cannot determine automatically. Use sparingly. The user's answer is exposed to later steps as \`\${steps.<thisStepId>.output.value}\` — reference it via inputMapping.
 
 ## Runtime Tokens -- Unique Values Per Run
 The executor replaces these tokens inside ANY string value in step inputs at execution time:
@@ -705,6 +715,9 @@ Example for "Add reaction to message":
   - inputMapping: { "messageTimestamp": "\${steps.step_1.output.ts}", "channel": "\${steps.step_1.output.channel}" }
 
 The executor resolves inputMapping at runtime, so step 2 always gets the FRESH message timestamp from step 1.
+
+For a **human_input** step, the answer is at \`output.value\`:
+- inputMapping: { "receiver": "\${steps.step_ask_email.output.value}" }
 
 ## Rules
 - Fetch source code FIRST to understand action properties, especially DROPDOWN/DYNAMIC fields

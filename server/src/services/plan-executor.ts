@@ -14,7 +14,7 @@ import {
   type TriggerSimContext,
 } from './trigger-engine.js';
 import { createClient } from './test-engine.js';
-import type { PieceMetadataFull } from './ap-client.js';
+import { ActivepiecesClient, type PieceMetadataFull } from './ap-client.js';
 
 // ── Types ──
 
@@ -428,7 +428,8 @@ export async function executePlan(
         if (step.savedHumanResponse) {
           sr.status = 'completed';
           sr.humanResponse = step.savedHumanResponse;
-          sr.output = { humanResponse: step.savedHumanResponse };
+          // `value` is the canonical mapping key (${steps.<id>.output.value}); `humanResponse` kept for back-compat.
+          sr.output = { value: step.savedHumanResponse, humanResponse: step.savedHumanResponse };
           saveResults();
 
           onProgress({
@@ -463,7 +464,7 @@ export async function executePlan(
 
         sr.status = 'completed';
         sr.humanResponse = response.humanResponse;
-        sr.output = { humanResponse: response.humanResponse };
+        sr.output = { value: response.humanResponse, humanResponse: response.humanResponse };
         saveResults();
 
         onProgress({
@@ -593,7 +594,9 @@ export async function executePlan(
         }
 
       } catch (err: any) {
-        const message = err.message || 'Unknown error';
+        // formatError surfaces the piece's real error (AP wraps it in the response body)
+        // rather than an opaque "Request failed with status code N" — for triggers and actions alike.
+        const message = ActivepiecesClient.formatError(err) || 'Unknown error';
         sr.status = 'failed';
         sr.error = message;
         sr.errorCategory = classifyError(message);

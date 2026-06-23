@@ -1,5 +1,6 @@
 import type { ToolDefinition } from '../types.js';
 import { simulateTriggerOnAP } from '../../../services/trigger-engine.js';
+import { ActivepiecesClient } from '../../../services/ap-client.js';
 
 export const testTriggerSimulationTool: ToolDefinition = {
   name: 'test_trigger_simulation',
@@ -30,7 +31,7 @@ export const testTriggerSimulationTool: ToolDefinition = {
       }
       return `Success (${result.sampleCount} captured event(s)):\n\n${text.slice(0, 10000)}`;
     } catch (err: any) {
-      return `Failed: ${err.message}`;
+      return `Failed: ${ActivepiecesClient.formatError(err)}`;
     }
   },
 };
