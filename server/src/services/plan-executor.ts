@@ -108,7 +108,7 @@ function summarizeFailedAssertions(results: AssertionResult[]): string {
 }
 
 /** Deterministically classify a thrown step error from its message/status code. */
-function classifyError(message: string): ErrorCategory {
+export function classifyError(message: string): ErrorCategory {
   const m = (message || '').toLowerCase();
   if (/\b(401|403)\b/.test(m) || /unauthor|forbidden|invalid token|token (is )?expired|expired token|credential|permission|access denied|not authenticated/.test(m)) return 'auth';
   if (/\b429\b/.test(m) || /rate.?limit|too many requests|quota exceeded/.test(m)) return 'rate_limit';

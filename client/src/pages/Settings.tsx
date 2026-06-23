@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api, type AiCostSummary, type AiUsageRow } from '../lib/api';
-import { CheckCircle, XCircle, Loader2, LogIn, LogOut, ShieldCheck, Brain, Trash2, DollarSign, TrendingUp, Zap, Plug } from 'lucide-react';
+import { CheckCircle, XCircle, Loader2, LogIn, LogOut, ShieldCheck, Brain, Trash2, DollarSign, TrendingUp, Zap, Plug, Bell } from 'lucide-react';
 
 const AI_MODELS = [
   { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (latest)' },
@@ -9,7 +9,7 @@ const AI_MODELS = [
 ];
 
 export default function Settings() {
-  const [form, setForm] = useState({ base_url: '', api_key: '', project_id: '', test_timeout_ms: 180000 });
+  const [form, setForm] = useState({ base_url: '', api_key: '', project_id: '', test_timeout_ms: 180000, notify_webhook_url: '' });
   const [hasJwt, setHasJwt] = useState(false);
   const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
   const [anthropicKeyMasked, setAnthropicKeyMasked] = useState('');
@@ -21,6 +21,11 @@ export default function Settings() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saveMsg, setSaveMsg] = useState('');
+
+  // Failure notifications (Discord via AP Catch-Webhook)
+  const [savingNotify, setSavingNotify] = useState(false);
+  const [testingNotify, setTestingNotify] = useState(false);
+  const [notifyResult, setNotifyResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Sign-in form
   const [email, setEmail] = useState('');
@@ -42,7 +47,7 @@ export default function Settings() {
 
   useEffect(() => {
     api.getSettings().then((s) => {
-      setForm({ base_url: s.base_url, api_key: s.api_key, project_id: s.project_id, test_timeout_ms: s.test_timeout_ms });
+      setForm({ base_url: s.base_url, api_key: s.api_key, project_id: s.project_id, test_timeout_ms: s.test_timeout_ms, notify_webhook_url: s.notify_webhook_url || '' });
       setHasJwt(s.has_jwt);
       setHasAnthropicKey(s.has_anthropic_key);
       setAnthropicKeyMasked(s.anthropic_key_masked || '');
@@ -94,6 +99,32 @@ export default function Settings() {
       setTestResult({ success: false, message: err.message });
     }
     setTesting(false);
+  };
+
+  const handleSaveNotify = async () => {
+    setSavingNotify(true);
+    setNotifyResult(null);
+    try {
+      await api.updateSettings(form);
+      setNotifyResult({ success: true, message: 'Notification webhook saved.' });
+    } catch (err: any) {
+      setNotifyResult({ success: false, message: err.message });
+    }
+    setSavingNotify(false);
+  };
+
+  const handleTestNotify = async () => {
+    setTestingNotify(true);
+    setNotifyResult(null);
+    try {
+      // Persist the current URL first so the server tests exactly what's shown.
+      await api.updateSettings(form);
+      const res = await api.testNotification();
+      setNotifyResult(res);
+    } catch (err: any) {
+      setNotifyResult({ success: false, message: err.message });
+    }
+    setTestingNotify(false);
   };
 
   const handleSignIn = async () => {
@@ -222,6 +253,42 @@ export default function Settings() {
           <div className={`flex items-center gap-2 text-sm ${testResult.success ? 'text-green-400' : 'text-red-400'}`}>
             {testResult.success ? <CheckCircle size={16} /> : <XCircle size={16} />}
             {testResult.message}
+          </div>
+        )}
+      </div>
+
+      {/* Failure Notifications (Discord) */}
+      <div className="bg-gray-900 rounded-lg border border-gray-800 p-6 max-w-xl space-y-4 mb-6">
+        <h3 className="text-lg font-semibold flex items-center gap-2"><Bell size={18} /> Failure Notifications</h3>
+        <p className="text-sm text-gray-400">
+          When a scheduled run has piece-implicating failures, Piece Tester posts one
+          aggregated alert to an Activepieces <span className="text-gray-300">Catch Webhook</span> flow.
+          Wire that flow to a <span className="text-gray-300">Discord → Send Message</span> action and
+          paste its production webhook URL here. Leave empty to disable. Env/credential
+          failures (auth, rate-limit, timeouts) are intentionally not alerted.
+        </p>
+        <div>
+          <label className="block text-sm text-gray-400 mb-1">Activepieces Catch-Webhook URL</label>
+          <input
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-primary-500"
+            value={form.notify_webhook_url}
+            onChange={(e) => setForm({ ...form, notify_webhook_url: e.target.value })}
+            placeholder="https://cloud.activepieces.com/api/v1/webhooks/..."
+          />
+        </div>
+        <div className="flex gap-3 pt-2">
+          <button onClick={handleSaveNotify} disabled={savingNotify} className="px-4 py-2 bg-primary-600 hover:bg-primary-700 rounded text-sm font-medium disabled:opacity-50">
+            {savingNotify ? 'Saving...' : 'Save'}
+          </button>
+          <button onClick={handleTestNotify} disabled={testingNotify || !form.notify_webhook_url.trim()} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium disabled:opacity-50 flex items-center gap-2">
+            {testingNotify && <Loader2 size={14} className="animate-spin" />}
+            Send Test Alert
+          </button>
+        </div>
+        {notifyResult && (
+          <div className={`flex items-center gap-2 text-sm ${notifyResult.success ? 'text-green-400' : 'text-red-400'}`}>
+            {notifyResult.success ? <CheckCircle size={16} /> : <XCircle size={16} />}
+            {notifyResult.message}
           </div>
         )}
       </div>

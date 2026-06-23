@@ -1,7 +1,8 @@
 import { ActivepiecesClient, TERMINAL_STATUSES, type FlowRunStatus, type PieceMetadataFull } from './ap-client.js';
 import { buildConnectionValue, makeExternalId, type ConnectionType } from './connection-builder.js';
-import { getSettings, listConnections, listTestPlans, createTestRun, createTestResult, updateTestRun, type PieceConnectionRow, type ScheduleTarget } from '../db/queries.js';
-import { executePlan } from './plan-executor.js';
+import { getSettings, listConnections, listTestPlans, createTestRun, createTestResult, updateTestRun, getTestRun, listTestResults, type PieceConnectionRow, type ScheduleTarget } from '../db/queries.js';
+import { executePlan, classifyError, type StepResult } from './plan-executor.js';
+import { notifyScheduledFailure, isPieceImplicating, type ScheduledFailure } from './notifier.js';
 
 const POLL_INTERVAL_MS = 3_000;
 const ACTION_STEP_NAME = 'step_1';
@@ -60,9 +61,12 @@ export async function runTests(pieceNames?: string[]): Promise<number> {
 /**
  * Run scheduled tests for the given targets.
  * targets = [] means "all pieces, all actions".
- * Also runs all approved test plans matching the targets (in the background).
+ * Runs the legacy engine and all approved matching test plans, waits for both to
+ * finish, then sends ONE aggregated Discord alert (via the notifier) covering every
+ * piece-implicating failure across the firing. The legacy run and plan runs execute
+ * concurrently so awaiting both doesn't serialize the schedule.
  */
-export async function runScheduledTests(targets?: ScheduleTarget[] | null): Promise<number> {
+export async function runScheduledTests(targets?: ScheduleTarget[] | null, scheduleLabel?: string): Promise<number> {
   const connections = listConnections();
 
   // ── Determine which connections/actions to test (legacy engine) ──
@@ -74,9 +78,15 @@ export async function runScheduledTests(targets?: ScheduleTarget[] | null): Prom
     toTest = connections.filter(c => targetPieces.has(c.piece_name));
   }
 
-  // ── Legacy test run ──
+  // Aggregated across both paths; the notifier reports only piece-implicating failures.
+  const failures: ScheduledFailure[] = [];
+  let total = 0, passed = 0, failed = 0;
   let runId = -1;
-  if (toTest.length > 0) {
+
+  // ── Legacy test run (runs concurrently with plans below) ──
+  const legacyPromise = (async () => {
+    if (toTest.length === 0) return;
+
     // If targets specify specific actions, filter actions_config per connection
     const filteredConns = toTest.map(conn => {
       if (!targets || targets.length === 0) return conn;
@@ -95,13 +105,38 @@ export async function runScheduledTests(targets?: ScheduleTarget[] | null): Prom
 
     const run = createTestRun('scheduled');
     runId = run.id;
-    executeTestRun(run.id, filteredConns).catch(err => {
+    try {
+      await executeTestRun(run.id, filteredConns);
+    } catch (err) {
       console.error('[test-engine] Fatal error in scheduled run', run.id, err);
       updateTestRun(run.id, { status: 'failed', finished_at: new Date().toISOString() });
-    });
-  }
+    }
 
-  // ── Test plan runs (modern approach) ──
+    // Collect counts + failures from the completed run.
+    const finalRun = getTestRun(run.id);
+    const results = listTestResults(run.id);
+    total += finalRun?.total_tests ?? results.length;
+    passed += finalRun?.passed ?? 0;
+    failed += (finalRun?.failed ?? 0) + (finalRun?.errors ?? 0);
+
+    for (const r of results) {
+      if (r.status === 'passed') continue;
+      // The legacy engine doesn't classify; apply the same deterministic classifier
+      // used by plans so env/credential noise is filtered out consistently.
+      const category = classifyError(r.error_message || '');
+      if (isPieceImplicating(r.status, category)) {
+        failures.push({
+          piece: r.piece_name,
+          action: r.action_name,
+          status: r.status,
+          category,
+          error: r.error_message || `Status: ${r.status}`,
+        });
+      }
+    }
+  })();
+
+  // ── Test plan runs (modern approach, runs concurrently with the legacy run) ──
   const allPlans = listTestPlans();
   const plansToRun = allPlans.filter(p => {
     if (p.status !== 'approved') return false;
@@ -126,17 +161,61 @@ export async function runScheduledTests(targets?: ScheduleTarget[] | null): Prom
     }
   });
 
-  if (validPlans.length > 0) {
+  const plansPromise = (async () => {
+    if (validPlans.length === 0) return;
     console.log(`[scheduler] Running ${validPlans.length} test plan(s)...`);
-    (async () => {
-      for (const plan of validPlans) {
-        try {
-          await executePlan(plan.id, () => {}, 'scheduled');
-        } catch (err) {
-          console.error(`[scheduler] Plan #${plan.id} (${plan.target_action}) failed:`, err);
+    for (const plan of validPlans) {
+      total += 1;
+      try {
+        const planRun = await executePlan(plan.id, () => {}, 'scheduled');
+        if (planRun.status === 'completed') {
+          passed += 1;
+          continue;
         }
+        // failed / cancelled / other non-completed terminal state.
+        failed += 1;
+        let steps: StepResult[] = [];
+        try { steps = JSON.parse(planRun.step_results || '[]'); } catch { /* leave empty */ }
+        for (const s of steps) {
+          if (s.status !== 'failed' && s.status !== 'assert_failed') continue;
+          if (isPieceImplicating(s.status, s.errorCategory)) {
+            failures.push({
+              piece: plan.piece_name,
+              action: plan.target_action || s.label || s.stepId,
+              status: s.status,
+              category: s.errorCategory,
+              error: s.error || `Step "${s.label || s.stepId}" ${s.status}`,
+            });
+          }
+        }
+      } catch (err) {
+        // executePlan threw before producing a run row — treat as an unknown piece error.
+        failed += 1;
+        console.error(`[scheduler] Plan #${plan.id} (${plan.target_action}) failed:`, err);
+        failures.push({
+          piece: plan.piece_name,
+          action: plan.target_action,
+          status: 'error',
+          category: 'unknown',
+          error: ActivepiecesClient.formatError(err),
+        });
       }
-    })();
+    }
+  })();
+
+  await Promise.all([legacyPromise, plansPromise]);
+
+  // ── One aggregated alert per firing (no-op if nothing piece-implicating) ──
+  if (failures.length > 0) {
+    await notifyScheduledFailure({
+      event: 'scheduled_run_failed',
+      schedule: scheduleLabel || 'Scheduled run',
+      runId: runId === -1 ? null : runId,
+      trigger: 'scheduled',
+      ts: new Date().toISOString(),
+      summary: { total, passed, failed },
+      failures,
+    });
   }
 
   return runId;

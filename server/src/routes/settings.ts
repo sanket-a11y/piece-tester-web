@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { Router } from 'express';
 import { getSettings, updateSettings, getAiUsageSummary, getAiUsageBySession, getAiUsageByPiece, getAiUsageRecent } from '../db/queries.js';
 import { ActivepiecesClient } from '../services/ap-client.js';
+import { sendTestNotification } from '../services/notifier.js';
 
 // ── MCP OAuth constants ──
 const MCP_OAUTH_AUTHORIZE_URL = 'https://mcp.activepieces.com/authorize';
@@ -104,6 +105,17 @@ router.post('/test-connection', async (req, res) => {
   } catch (err) {
     res.status(400).json({ success: false, error: ActivepiecesClient.formatError(err) });
   }
+});
+
+/**
+ * Send a sample failure alert to the configured AP Catch-Webhook URL so the user can
+ * verify their Discord wiring end-to-end. Save the URL (PUT /settings) before calling.
+ */
+router.post('/test-notification', async (_req, res) => {
+  // Always 200 — `success` in the body conveys whether delivery worked, so the
+  // client can render the message rather than throwing on an HTTP error.
+  const result = await sendTestNotification();
+  res.json(result);
 });
 
 /**

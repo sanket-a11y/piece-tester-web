@@ -755,6 +755,7 @@ export const api = {
   getSettings: () => request<any>('GET', '/settings'),
   updateSettings: (data: any) => request<any>('PUT', '/settings', data),
   testConnection: (data?: any) => request<any>('POST', '/settings/test-connection', data ?? {}),
+  testNotification: () => request<{ success: boolean; message: string }>('POST', '/settings/test-notification'),
   signIn: (email: string, password: string) => request<any>('POST', '/settings/sign-in', { email, password }),
   saveToken: (token: string) => request<any>('POST', '/settings/save-token', { token }),
   signOut: () => request<any>('POST', '/settings/sign-out'),

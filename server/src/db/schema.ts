@@ -89,6 +89,12 @@ function initTables(db: DatabaseAdapter): void {
     db.exec(`ALTER TABLE settings ADD COLUMN mcp_oauth_state TEXT NOT NULL DEFAULT ''`);
   }
 
+  // Migration: add notify_webhook_url column if missing (Discord failure alerts).
+  const cols4 = db.pragma(`table_info(settings)`) as { name: string }[];
+  if (!cols4.some(c => c.name === 'notify_webhook_url')) {
+    db.exec(`ALTER TABLE settings ADD COLUMN notify_webhook_url TEXT NOT NULL DEFAULT ''`);
+  }
+
   // Migration: add ai_config_meta column to piece_connections if missing
   const connCols = db.pragma(`table_info(piece_connections)`) as { name: string }[];
   // (table may not exist yet — the CREATE TABLE below creates it; run migration only if table exists)

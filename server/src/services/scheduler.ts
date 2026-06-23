@@ -45,7 +45,7 @@ export function initScheduler(): void {
       task = cron.schedule(schedule.cron_expression, async () => {
         console.log(`[scheduler] Running "${label}" (targets: ${targetDesc}, tz: ${tz})`);
         try {
-          await runScheduledTests(targets);
+          await runScheduledTests(targets, label);
           updateSchedule(schedule.id, { last_run_at: new Date().toISOString() });
         } catch (err) {
           console.error(`[scheduler] "${label}" failed:`, err);

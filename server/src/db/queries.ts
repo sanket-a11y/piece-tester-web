@@ -19,6 +19,7 @@ export interface SettingsRow {
   mcp_client_id: string;
   mcp_pkce_verifier: string; // temporary during OAuth flow
   mcp_oauth_state: string;   // temporary CSRF state
+  notify_webhook_url: string; // AP Catch-Webhook URL for Discord failure alerts ('' = off)
   updated_at: string;
 }
 
@@ -44,6 +45,7 @@ export function updateSettings(s: Partial<Omit<SettingsRow, 'id' | 'updated_at'>
       mcp_client_id = ?,
       mcp_pkce_verifier = ?,
       mcp_oauth_state = ?,
+      notify_webhook_url = ?,
       updated_at = datetime('now')
     WHERE id = 1
   `, [
@@ -61,6 +63,7 @@ export function updateSettings(s: Partial<Omit<SettingsRow, 'id' | 'updated_at'>
     s.mcp_client_id ?? current.mcp_client_id,
     s.mcp_pkce_verifier ?? current.mcp_pkce_verifier,
     s.mcp_oauth_state ?? current.mcp_oauth_state,
+    s.notify_webhook_url ?? current.notify_webhook_url,
   ]);
   return getSettings();
 }
