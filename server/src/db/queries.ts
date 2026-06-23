@@ -590,6 +590,44 @@ export function listAllPlanRuns(options?: { pieceName?: string; limit?: number; 
   `, [limit, offset]);
 }
 
+/**
+ * On startup, reconcile runs left non-terminal by a previous process (crash/restart).
+ * Plan execution state and resume signals live in memory, so any 'running'/'paused_*'
+ * row can never advance again — it would show a phantom spinner in the logs forever.
+ * Mark such runs failed with a clear reason, and flip their in-flight steps too so the
+ * expanded view doesn't keep spinning. Idempotent; safe to call on every boot.
+ */
+export function reconcileStaleRuns(): { planRuns: number; testRuns: number } {
+  const db = getDb();
+  const REASON = 'Interrupted — server restarted mid-run.';
+
+  // Modern plan runs
+  const stale = db.all<{ id: number; step_results: string }>(
+    `SELECT id, step_results FROM test_plan_runs WHERE status NOT IN ('completed','failed','cancelled')`,
+  );
+  for (const r of stale) {
+    let steps: Array<{ status?: string; error?: string | null }> = [];
+    try { steps = JSON.parse(r.step_results || '[]'); } catch { steps = []; }
+    for (const s of steps) {
+      if (!s) continue;
+      if (s.status === 'running') { s.status = 'failed'; s.error = s.error || REASON; }
+      else if (s.status === 'pending' || s.status === 'waiting') { s.status = 'skipped'; s.error = s.error || REASON; }
+    }
+    db.run(
+      `UPDATE test_plan_runs SET status = 'failed', completed_at = datetime('now'),
+         current_step_id = NULL, paused_prompt = NULL, step_results = ? WHERE id = ?`,
+      [JSON.stringify(steps), r.id],
+    );
+  }
+
+  // Legacy test runs
+  const legacy = db.run(
+    `UPDATE test_runs SET status = 'failed', finished_at = datetime('now') WHERE status NOT IN ('completed','failed')`,
+  );
+
+  return { planRuns: stale.length, testRuns: legacy.changes };
+}
+
 // ── Piece Lessons ──
 
 export interface PieceLessonRow {

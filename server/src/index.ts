@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getDb } from './db/schema.js';
+import { reconcileStaleRuns } from './db/queries.js';
 import { initScheduler } from './services/scheduler.js';
 import settingsRoutes from './routes/settings.js';
 import piecesRoutes from './routes/pieces.js';
@@ -48,6 +49,12 @@ app.get('*', (_req, res) => {
 // ── Start ──
 const db = getDb();
 console.log('[server] Database initialized');
+
+// Clean up any runs orphaned by a previous crash/restart so they don't spin forever.
+const reconciled = reconcileStaleRuns();
+if (reconciled.planRuns || reconciled.testRuns) {
+  console.log(`[server] Reconciled stale runs: ${reconciled.planRuns} plan run(s), ${reconciled.testRuns} legacy run(s) marked failed`);
+}
 
 initScheduler();
 
