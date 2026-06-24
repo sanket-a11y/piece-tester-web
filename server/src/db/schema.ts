@@ -208,6 +208,7 @@ function initTables(db: DatabaseAdapter): void {
       plan_id INTEGER NOT NULL REFERENCES test_plans(id) ON DELETE CASCADE,
       status TEXT NOT NULL DEFAULT 'running',
       trigger_type TEXT NOT NULL DEFAULT 'manual',
+      schedule_label TEXT NOT NULL DEFAULT '',
       current_step_id TEXT,
       step_results TEXT NOT NULL DEFAULT '[]',
       paused_prompt TEXT,
@@ -297,6 +298,12 @@ function initTables(db: DatabaseAdapter): void {
   const planRunCols = db.pragma(`table_info(test_plan_runs)`) as { name: string }[];
   if (planRunCols.length > 0 && !planRunCols.some(c => c.name === 'trigger_type')) {
     db.exec(`ALTER TABLE test_plan_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'`);
+  }
+
+  // Migration: add schedule_label column to test_plan_runs if missing.
+  // Records which schedule fired a run so the Scheduled Runs feed can group/title by it.
+  if (planRunCols.length > 0 && !planRunCols.some(c => c.name === 'schedule_label')) {
+    db.exec(`ALTER TABLE test_plan_runs ADD COLUMN schedule_label TEXT NOT NULL DEFAULT ''`);
   }
 
   // Migration: add automation_status column to test_plans if missing

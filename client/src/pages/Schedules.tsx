@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, PlanRunRecord, StepResult } from '../lib/api';
+import { api, PlanRunRecord, StepResult, AssertionResult } from '../lib/api';
 import TestResultBadge from '../components/TestResultBadge';
 import {
   Plus, Trash2, Pencil, Clock, CheckCircle, XCircle,
   Power, PowerOff, CalendarClock, ScrollText, RefreshCw,
   ChevronDown, ChevronRight, Loader2, SkipForward, MessageSquare,
   Calendar, Play, Filter, Archive,
+  Shield, Check, X, AlertTriangle, Zap, FileText,
 } from 'lucide-react';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -87,6 +88,49 @@ function formatDateTime(iso: string): string {
   } catch { return iso; }
 }
 
+// "3m ago", "2h ago", "5d ago" — a human-friendly relative timestamp.
+function relativeTime(iso: string): string {
+  const t = parseTs(iso);
+  if (!Number.isFinite(t)) return '';
+  const diff = Date.now() - t;
+  if (diff < 0) return 'just now';
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  return formatDateTime(iso);
+}
+
+/** Strip the AP package prefix so "@activepieces/piece-teamhood" → "teamhood". */
+function shortPiece(name: string): string {
+  return (name || '').replace(/^@[^/]+\/piece-/, '');
+}
+
+// A step "failed" if it threw (failed) OR produced wrong output (assert_failed).
+function isStepFailed(status: string): boolean {
+  return status === 'failed' || status === 'assert_failed';
+}
+
+function fmtVal(v: unknown): string {
+  if (v === undefined) return 'undefined';
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+// Deterministic error-category badges (mirrors TestPlanView so the language is consistent).
+const ERROR_CATEGORY_LABELS: Record<string, { label: string; cls: string }> = {
+  auth:        { label: 'Auth / token',  cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  rate_limit:  { label: 'Rate limited',  cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  transient:   { label: 'Transient',     cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  bad_request: { label: 'Bad input',     cls: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+  not_found:   { label: 'Not found',     cls: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
+  piece_error: { label: 'Piece error',   cls: 'bg-red-500/15 text-red-300 border-red-500/30' },
+  unknown:     { label: 'Unknown',       cls: 'bg-gray-600/30 text-gray-300 border-gray-600/40' },
+};
+
 // Treat the naive-UTC `started_at` ("2026-06-22 08:48:37") as UTC so durations
 // aren't skewed by the local offset; `completed_at` is already ISO-UTC ("...Z").
 function parseTs(s?: string | null): number {
@@ -113,30 +157,52 @@ function shortError(err: string): string {
   return msg.length > 130 ? msg.slice(0, 130) + '…' : msg;
 }
 
+/** One-line, human reason for the first failing step — covers both thrown
+ *  errors (`failed`) and oracle/assertion failures (`assert_failed`). */
 function firstFailedStepError(run: PlanRunRecord): string | null {
   const steps: StepResult[] = Array.isArray(run.step_results)
     ? run.step_results
     : (typeof run.step_results === 'string' ? safeParseSteps(run.step_results as any) : []);
-  const s = steps.find(x => x.status === 'failed');
-  return s?.error ? shortError(s.error) : null;
+  const s = steps.find(x => isStepFailed(x.status));
+  if (!s) return null;
+  if (s.error) return shortError(s.error);
+  // assert_failed: the reason lives in the failing assertion, not in `error`.
+  const bad = s.assertions?.find(a => !a.passed);
+  if (bad) {
+    const check = `${bad.path || 'output'} ${bad.op}${bad.expected !== undefined ? ` ${fmtVal(bad.expected)}` : ''}`;
+    return `Assertion failed: ${check} — got ${fmtVal(bad.actual).slice(0, 80)}`;
+  }
+  return s.status === 'assert_failed' ? 'Output assertion failed' : null;
 }
 
-interface Wave { key: string; startTs: string; runs: PlanRunRecord[]; }
+interface Wave { key: string; label: string; startTs: string; runs: PlanRunRecord[]; }
 
-// A scheduled cron fire produces many runs close together. Cluster them into
-// "waves": a new wave starts when there's a >10min idle gap between consecutive runs.
+// A scheduled cron fire produces many runs close together. We group them into
+// "waves" — one wave = one fire of one schedule — so the feed reads as
+// "the 'Nightly regression' run from 2h ago". Group first by the schedule's
+// label (so two schedules firing at once stay separate), then split each group
+// on a >10min idle gap between consecutive runs. Waves are returned newest-first.
 function clusterWaves(runs: PlanRunRecord[]): Wave[] {
-  const sorted = [...runs].sort((a, b) => parseTs(b.started_at) - parseTs(a.started_at));
   const GAP_MS = 10 * 60 * 1000;
-  const waves: Wave[] = [];
-  let cur: Wave | null = null;
-  for (const r of sorted) {
-    const fits = cur && (parseTs(cur.startTs) - parseTs(r.started_at)) <= GAP_MS;
-    if (!fits) { cur = { key: `w-${r.id}`, startTs: r.started_at, runs: [] }; waves.push(cur); }
-    cur!.runs.push(r);
-    cur!.startTs = r.started_at; // sorted desc → oldest-so-far = the fire time
+  const byLabel = new Map<string, PlanRunRecord[]>();
+  for (const r of runs) {
+    const key = r.schedule_label || '';
+    if (!byLabel.has(key)) byLabel.set(key, []);
+    byLabel.get(key)!.push(r);
   }
-  return waves;
+
+  const waves: Wave[] = [];
+  for (const [label, group] of byLabel) {
+    const sorted = [...group].sort((a, b) => parseTs(b.started_at) - parseTs(a.started_at));
+    let cur: Wave | null = null;
+    for (const r of sorted) {
+      const fits = cur && (parseTs(cur.startTs) - parseTs(r.started_at)) <= GAP_MS;
+      if (!fits) { cur = { key: `w-${r.id}`, label, startTs: r.started_at, runs: [] }; waves.push(cur); }
+      cur!.runs.push(r);
+      cur!.startTs = r.started_at; // sorted desc → oldest-so-far = the fire time
+    }
+  }
+  return waves.sort((a, b) => parseTs(b.startTs) - parseTs(a.startTs));
 }
 
 // ── Target type ────────────────────────────────────────────────────────────
@@ -441,9 +507,10 @@ export default function Schedules() {
           {/* What this tab is, vs the global Test Logs page */}
           <div className="flex items-start justify-between gap-4">
             <p className="text-xs text-gray-500 max-w-2xl">
-              History of runs triggered by your <span className="text-gray-300">schedules</span>.
-              For <span className="text-gray-300">all</span> test runs — including manual tests you start
-              from a piece — see{' '}
+              Run-by-run log of what your <span className="text-gray-300">schedules</span> fired — expand any
+              run to see its steps, outputs and errors. For aggregate health, trends and AI failure analysis
+              see <Link to="/reports" className="text-primary-400 hover:underline">Reports</Link>; for all
+              test runs (including manual ones) see{' '}
               <Link to="/history" className="text-primary-400 hover:underline">Test Logs</Link>.
             </p>
             <button
@@ -856,6 +923,7 @@ function TargetPicker({
 
 function ExpandablePlanRuns({ runs }: { runs: PlanRunRecord[] }) {
   const [failedOnly, setFailedOnly] = useState(false);
+  const [pieceFilter, setPieceFilter] = useState<string>('');
   const [expandedWave, setExpandedWave] = useState<string | null>(null); // null = default(first open), '__none__' = all closed
   const [expandedRun, setExpandedRun] = useState<number | null>(null);
 
@@ -872,7 +940,13 @@ function ExpandablePlanRuns({ runs }: { runs: PlanRunRecord[] }) {
   const failed = runs.filter(r => r.status === 'failed').length;
   const running = runs.filter(r => r.status === 'running').length;
 
-  const view = failedOnly ? runs.filter(r => r.status === 'failed') : runs;
+  // Distinct pieces for the filter dropdown.
+  const pieces = Array.from(new Set(runs.map(r => r.piece_name))).sort();
+
+  const view = runs.filter(r =>
+    (!failedOnly || r.status === 'failed') &&
+    (!pieceFilter || r.piece_name === pieceFilter)
+  );
   const waves = clusterWaves(view);
 
   // Most recent wave is open by default; '__none__' means the user closed it.
@@ -883,12 +957,24 @@ function ExpandablePlanRuns({ runs }: { runs: PlanRunRecord[] }) {
 
   return (
     <div className="space-y-3">
-      {/* Summary + filter */}
+      {/* Lightweight counts of what's in the feed + filters. Aggregate analytics
+          (health score, trends, piece ranking, AI failure analysis) live on the
+          Reports page — this tab stays a chronological run log. */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
         <span className="text-gray-400">{total} runs</span>
         <span className="text-green-400">{passed} passed</span>
         <span className="text-red-400">{failed} failed</span>
         {running > 0 && <span className="text-blue-400">{running} running</span>}
+        {pieces.length > 1 && (
+          <select
+            value={pieceFilter}
+            onChange={e => setPieceFilter(e.target.value)}
+            className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300 focus:outline-none focus:border-primary-500"
+          >
+            <option value="">All pieces</option>
+            {pieces.map(p => <option key={p} value={p}>{shortPiece(p)}</option>)}
+          </select>
+        )}
         <button
           onClick={() => setFailedOnly(v => !v)}
           className={`ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded border transition-colors ${
@@ -921,8 +1007,9 @@ function ExpandablePlanRuns({ runs }: { runs: PlanRunRecord[] }) {
   );
 }
 
-// One collapsible group per schedule fire ("wave"): summary on the header,
-// the individual runs inside.
+// One collapsible group per schedule fire ("wave"). The header is the schedule's
+// title (its label) so users see *which* schedule this was, plus when it ran and
+// how it did; the individual target runs live inside.
 function WaveGroup({ wave, open, onToggle, expandedRun, onToggleRun }: {
   wave: Wave;
   open: boolean;
@@ -935,25 +1022,37 @@ function WaveGroup({ wave, open, onToggle, expandedRun, onToggleRun }: {
   const failed = wave.runs.filter(r => r.status === 'failed').length;
   const running = wave.runs.filter(r => r.status === 'running').length;
 
-  const icon = running > 0 ? <Loader2 size={14} className="text-blue-400 animate-spin" />
-    : failed > 0 ? <XCircle size={14} className="text-red-400" />
-    : <CheckCircle size={14} className="text-green-400" />;
+  const icon = running > 0 ? <Loader2 size={15} className="text-blue-400 animate-spin" />
+    : failed > 0 ? <XCircle size={15} className="text-red-400" />
+    : <CheckCircle size={15} className="text-green-400" />;
   const border = failed > 0 ? 'border-red-500/20' : running > 0 ? 'border-blue-500/20' : 'border-gray-800';
+
+  const title = wave.label || 'Scheduled run';
 
   return (
     <div className={`border rounded-lg ${border} bg-gray-900/60 overflow-hidden`}>
       <button
         onClick={onToggle}
-        className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-gray-800/40 transition-colors"
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-800/40 transition-colors"
       >
-        {open ? <ChevronDown size={14} className="text-gray-500" /> : <ChevronRight size={14} className="text-gray-500" />}
+        {open ? <ChevronDown size={14} className="text-gray-500 shrink-0" /> : <ChevronRight size={14} className="text-gray-500 shrink-0" />}
         {icon}
-        <span className="text-sm font-medium text-gray-200">{formatDateTime(wave.startTs)}</span>
-        <span className="flex items-center gap-1 text-[10px] text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
-          <Calendar size={10} className="text-purple-400" /> scheduled
-        </span>
-        <div className="flex-1" />
-        <div className="flex items-center gap-3 text-xs">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-gray-100 truncate">{title}</span>
+            <span className="flex items-center gap-1 text-[10px] text-purple-300 bg-purple-500/10 border border-purple-500/20 px-1.5 py-0.5 rounded">
+              <Calendar size={10} /> scheduled
+            </span>
+          </div>
+          <div className="flex items-center gap-2 mt-0.5 text-[11px] text-gray-500">
+            <span className="text-gray-400">{relativeTime(wave.startTs)}</span>
+            <span className="text-gray-700">·</span>
+            <span>{formatDateTime(wave.startTs)}</span>
+            <span className="text-gray-700">·</span>
+            <span>{total} target{total !== 1 ? 's' : ''}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 text-xs shrink-0">
           <span className={failed > 0 ? 'text-gray-400' : 'text-green-400'}>{passed}/{total} passed</span>
           {failed > 0 && <span className="text-red-400 font-medium">{failed} failed</span>}
           {running > 0 && <span className="text-blue-400">{running} running</span>}
@@ -982,9 +1081,10 @@ function PlanRunCard({ run, expanded, onToggle }: { run: PlanRunRecord; expanded
     : (typeof run.step_results === 'string' ? JSON.parse(run.step_results as any) : []);
 
   const stepsCompleted = stepResults.filter(s => s.status === 'completed').length;
-  const stepsFailed    = stepResults.filter(s => s.status === 'failed').length;
+  const stepsFailed    = stepResults.filter(s => isStepFailed(s.status)).length;
   const totalSteps     = stepResults.length;
   const duration = runDurationSec(run);
+  const isTrigger = run.target_type === 'trigger';
 
   const statusBorder = run.status === 'completed' ? 'border-green-500/20'
     : run.status === 'failed' ? 'border-red-500/20'
@@ -1003,14 +1103,15 @@ function PlanRunCard({ run, expanded, onToggle }: { run: PlanRunRecord; expanded
       >
         {statusIcon}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-gray-200">{run.target_action}</span>
-            <span className="text-[10px] text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">{run.piece_name}</span>
-          </div>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className="flex items-center gap-1 text-[10px] text-gray-500">
-              <Calendar size={10} className="text-purple-400" /> scheduled
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Action vs trigger — "which type of field" this run tested */}
+            <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wide flex items-center gap-1 ${
+              isTrigger ? 'bg-blue-500/10 text-blue-400' : 'bg-green-500/10 text-green-400'
+            }`}>
+              {isTrigger ? <Zap size={9} /> : <Play size={9} />} {isTrigger ? 'trigger' : 'action'}
             </span>
+            <span className="text-sm font-medium text-gray-200 truncate">{run.target_action}</span>
+            <span className="text-[10px] text-gray-400 bg-gray-800 border border-gray-700/60 px-1.5 py-0.5 rounded">{shortPiece(run.piece_name)}</span>
             <span className="text-[10px] text-gray-600">#{run.id}</span>
           </div>
         </div>
@@ -1020,6 +1121,7 @@ function PlanRunCard({ run, expanded, onToggle }: { run: PlanRunRecord; expanded
           {stepResults.map((sr, i) => {
             const color = sr.status === 'completed' ? 'bg-green-500'
               : sr.status === 'failed' ? 'bg-red-500'
+              : sr.status === 'assert_failed' ? 'bg-amber-500'
               : sr.status === 'running' ? 'bg-blue-500 animate-pulse'
               : sr.status === 'waiting' ? 'bg-yellow-500'
               : sr.status === 'skipped' ? 'bg-gray-600' : 'bg-gray-700';
@@ -1031,7 +1133,7 @@ function PlanRunCard({ run, expanded, onToggle }: { run: PlanRunRecord; expanded
           <span>{stepsCompleted}/{totalSteps} steps</span>
           {stepsFailed > 0 && <span className="text-red-400">{stepsFailed} failed</span>}
           {duration != null && <span>{duration}s</span>}
-          <span>{formatDateTime(run.started_at)}</span>
+          <span title={formatDateTime(run.started_at)}>{relativeTime(run.started_at)}</span>
         </div>
 
         {expanded ? <ChevronDown size={14} className="text-gray-500 flex-shrink-0" /> : <ChevronRight size={14} className="text-gray-500 flex-shrink-0" />}
@@ -1059,47 +1161,106 @@ function PlanRunCard({ run, expanded, onToggle }: { run: PlanRunRecord; expanded
   );
 }
 
+/** Evaluated output assertions (the oracle) for one step — expected vs. got. */
+function AssertionResultsView({ results }: { results?: AssertionResult[] }) {
+  if (!results || results.length === 0) return null;
+  return (
+    <div className="ml-8 mt-1 space-y-1">
+      <span className="text-[10px] text-gray-400 font-medium flex items-center gap-1"><Shield size={10} /> Assertions (oracle)</span>
+      {results.map((r, i) => (
+        <div key={i} className={`flex items-start gap-2 rounded p-1.5 border text-[10px] ${
+          r.passed ? 'bg-green-500/5 border-green-500/20' : 'bg-amber-500/10 border-amber-500/30'
+        }`}>
+          {r.passed
+            ? <Check size={11} className="text-green-400 mt-0.5 flex-shrink-0" />
+            : <X size={11} className="text-amber-400 mt-0.5 flex-shrink-0" />}
+          <div className="min-w-0">
+            <code className="text-gray-300">
+              {r.path || 'output'} {r.op}{r.expected !== undefined ? ` ${fmtVal(r.expected)}` : ''}
+            </code>
+            {!r.passed && (
+              <div className="text-amber-300/80 font-mono break-all">got: {fmtVal(r.actual).slice(0, 160)}</div>
+            )}
+            {r.description && <div className="text-gray-500">{r.description}</div>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function StepResultRow({ sr, idx }: { sr: StepResult; idx: number }) {
   const [showOutput, setShowOutput] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
 
   const icon = sr.status === 'completed' ? <CheckCircle size={12} className="text-green-400" />
     : sr.status === 'failed' ? <XCircle size={12} className="text-red-400" />
+    : sr.status === 'assert_failed' ? <AlertTriangle size={12} className="text-amber-400" />
     : sr.status === 'running' ? <Loader2 size={12} className="text-blue-400 animate-spin" />
     : sr.status === 'waiting' ? <MessageSquare size={12} className="text-yellow-400" />
     : sr.status === 'skipped' ? <SkipForward size={12} className="text-gray-600" />
     : <Clock size={12} className="text-gray-600" />;
 
+  const rowBg = sr.status === 'failed' ? 'bg-red-500/5'
+    : sr.status === 'assert_failed' ? 'bg-amber-500/5'
+    : sr.status === 'completed' ? 'bg-green-500/5' : '';
+
+  const hasLogs = !!(sr.logs && sr.logs.length > 0);
+  const hasOutput = sr.output != null && (sr.status === 'completed' || sr.status === 'assert_failed');
+
   return (
     <div>
-      <div className={`flex items-center gap-2 px-2 py-1.5 rounded text-xs ${
-        sr.status === 'failed' ? 'bg-red-500/5' :
-        sr.status === 'completed' ? 'bg-green-500/5' : ''
-      }`}>
+      <div className={`flex items-center gap-2 px-2 py-1.5 rounded text-xs ${rowBg}`}>
         <span className="text-[10px] text-gray-600 w-3 text-right">{idx + 1}</span>
         {icon}
         <span className="flex-1 truncate text-gray-300">{sr.label || sr.stepId}</span>
+        {sr.assertions && sr.assertions.length > 0 && (
+          <span className="text-[9px] text-gray-500 flex items-center gap-0.5" title="output assertions checked">
+            <Shield size={9} /> {sr.assertions.filter(a => a.passed).length}/{sr.assertions.length}
+          </span>
+        )}
         {sr.label && <span className="text-[10px] text-gray-600 font-mono shrink-0">{sr.stepId}</span>}
         {sr.duration_ms > 0 && (
           <span className="text-[10px] text-gray-500">{(sr.duration_ms / 1000).toFixed(1)}s</span>
         )}
-        {sr.output != null && sr.status === 'completed' && (
-          <button
-            onClick={() => setShowOutput(!showOutput)}
-            className="text-[10px] text-gray-500 hover:text-gray-300 px-1"
-          >
+        {hasLogs && (
+          <button onClick={() => setShowLogs(v => !v)} className="text-[10px] text-gray-500 hover:text-gray-300 px-1 flex items-center gap-0.5">
+            <FileText size={9} /> {showLogs ? 'hide' : 'logs'}
+          </button>
+        )}
+        {hasOutput && (
+          <button onClick={() => setShowOutput(v => !v)} className="text-[10px] text-gray-500 hover:text-gray-300 px-1">
             {showOutput ? 'hide' : 'output'}
           </button>
         )}
       </div>
-      {sr.error && (
-        <div className="ml-8 mt-1 text-[10px] text-red-400 bg-red-500/5 rounded p-1.5 font-mono whitespace-pre-wrap">
+
+      {/* Error (thrown). For assert_failed the amber assertions below tell the story. */}
+      {sr.error && sr.status !== 'assert_failed' && (
+        <div className="ml-8 mt-1 text-[10px] text-red-300 bg-red-500/5 border border-red-500/20 rounded p-1.5 font-mono whitespace-pre-wrap break-all">
+          {sr.errorCategory && (
+            <span className={`inline-block mb-1 mr-2 px-1.5 py-0.5 rounded border text-[9px] font-semibold ${ERROR_CATEGORY_LABELS[sr.errorCategory]?.cls || ''}`}>
+              {ERROR_CATEGORY_LABELS[sr.errorCategory]?.label || sr.errorCategory}
+            </span>
+          )}
           {sr.error}
         </div>
       )}
-      {showOutput && sr.output != null && (
-        <div className="ml-8 mt-1 text-[10px] text-green-400/60 bg-green-500/5 rounded p-1.5 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap">
+
+      {/* Output assertions (the oracle) — expected vs. got */}
+      <AssertionResultsView results={sr.assertions} />
+
+      {showLogs && hasLogs && (
+        <pre className="ml-8 mt-1 text-[10px] text-gray-300/80 bg-gray-800/50 rounded p-1.5 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap">
+          {sr.logs!.join('\n')}
+        </pre>
+      )}
+      {showOutput && hasOutput && (
+        <pre className={`ml-8 mt-1 text-[10px] rounded p-1.5 font-mono max-h-40 overflow-y-auto whitespace-pre-wrap ${
+          sr.status === 'assert_failed' ? 'text-amber-200/80 bg-amber-500/5' : 'text-green-300/70 bg-green-500/5'
+        }`}>
           {typeof sr.output === 'string' ? sr.output : JSON.stringify(sr.output, null, 2)}
-        </div>
+        </pre>
       )}
     </div>
   );

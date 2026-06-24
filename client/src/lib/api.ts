@@ -370,6 +370,8 @@ export interface PlanRunRecord {
   plan_id: number;
   status: string;
   trigger_type: string; // 'manual' | 'scheduled'
+  /** Label of the schedule that fired this run ('' for manual/legacy runs). */
+  schedule_label?: string;
   current_step_id: string | null;
   step_results: StepResult[];
   paused_prompt: string | null;
@@ -378,6 +380,8 @@ export interface PlanRunRecord {
   // Joined from test_plans
   piece_name: string;
   target_action: string;
+  /** 'action' (default) or 'trigger'. */
+  target_type?: string;
 }
 
 /**

@@ -535,6 +535,7 @@ export interface TestPlanRunRow {
   plan_id: number;
   status: string;           // 'running' | 'paused_for_human' | 'paused_for_approval' | 'completed' | 'failed'
   trigger_type: string;     // 'manual' | 'scheduled'
+  schedule_label: string;   // label of the schedule that fired this run ('' for manual/legacy)
   current_step_id: string | null;
   step_results: string;     // JSON array of StepResult
   paused_prompt: string | null;
@@ -542,11 +543,11 @@ export interface TestPlanRunRow {
   completed_at: string | null;
 }
 
-export function createPlanRun(planId: number, triggerType: string = 'manual'): TestPlanRunRow {
+export function createPlanRun(planId: number, triggerType: string = 'manual', scheduleLabel: string = ''): TestPlanRunRow {
   const result = getDb().run(`
-    INSERT INTO test_plan_runs (plan_id, status, trigger_type, step_results)
-    VALUES (?, 'running', ?, '[]')
-  `, [planId, triggerType]);
+    INSERT INTO test_plan_runs (plan_id, status, trigger_type, schedule_label, step_results)
+    VALUES (?, 'running', ?, ?, '[]')
+  `, [planId, triggerType, scheduleLabel]);
   return getPlanRun(result.lastId)!;
 }
 
@@ -564,6 +565,7 @@ export function listPlanRuns(planId: number): TestPlanRunRow[] {
 export interface PlanRunWithPlan extends TestPlanRunRow {
   piece_name: string;
   target_action: string;
+  target_type: string; // 'action' | 'trigger'
 }
 
 /**
@@ -575,7 +577,7 @@ export function listAllPlanRuns(options?: { pieceName?: string; limit?: number; 
   const offset = options?.offset ?? 0;
   if (options?.pieceName) {
     return getDb().all<PlanRunWithPlan>(`
-      SELECT r.*, p.piece_name, p.target_action
+      SELECT r.*, p.piece_name, p.target_action, p.target_type
       FROM test_plan_runs r
       JOIN test_plans p ON r.plan_id = p.id
       WHERE p.piece_name = ?
@@ -583,7 +585,7 @@ export function listAllPlanRuns(options?: { pieceName?: string; limit?: number; 
     `, [options.pieceName, limit, offset]);
   }
   return getDb().all<PlanRunWithPlan>(`
-    SELECT r.*, p.piece_name, p.target_action
+    SELECT r.*, p.piece_name, p.target_action, p.target_type
     FROM test_plan_runs r
     JOIN test_plans p ON r.plan_id = p.id
     ORDER BY r.id DESC LIMIT ? OFFSET ?

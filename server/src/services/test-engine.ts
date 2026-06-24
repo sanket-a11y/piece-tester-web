@@ -167,7 +167,7 @@ export async function runScheduledTests(targets?: ScheduleTarget[] | null, sched
     for (const plan of validPlans) {
       total += 1;
       try {
-        const planRun = await executePlan(plan.id, () => {}, 'scheduled');
+        const planRun = await executePlan(plan.id, () => {}, 'scheduled', undefined, scheduleLabel || '');
         if (planRun.status === 'completed') {
           passed += 1;
           continue;

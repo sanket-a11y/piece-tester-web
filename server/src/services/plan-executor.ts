@@ -298,6 +298,7 @@ export async function executePlan(
   onProgress: (progress: PlanProgress) => void,
   triggerType: string = 'manual',
   signal?: AbortSignal,
+  scheduleLabel: string = '',
 ): Promise<TestPlanRunRow> {
   const plan = getTestPlan(planId);
   if (!plan) throw new Error(`Plan ${planId} not found`);
@@ -310,7 +311,7 @@ export async function executePlan(
   const pieceMeta: PieceMetadataFull = await client.getPieceMetadata(plan.piece_name);
 
   // Create run
-  const run = createPlanRun(planId, triggerType);
+  const run = createPlanRun(planId, triggerType, scheduleLabel);
   const runId = run.id;
   const emitter = getResumeEmitter(runId);
 
