@@ -37,6 +37,12 @@ export default function Settings() {
   const [signInResult, setSignInResult] = useState<{ success: boolean; message: string } | null>(null);
   const [authMode, setAuthMode] = useState<'password' | 'token'>('token'); // default to token paste
 
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [serviceEmailMasked, setServiceEmailMasked] = useState('');
+  const [jwtExpiresAt, setJwtExpiresAt] = useState('');
+  const [jwtStatus, setJwtStatus] = useState('');
+  const [rememberMe, setRememberMe] = useState(true); // Email/Password tab: store creds for auto-refresh
+
   // AI config state
   const [anthropicKey, setAnthropicKey] = useState('');
   const [aiModel, setAiModel] = useState('claude-sonnet-4-6');
@@ -53,6 +59,10 @@ export default function Settings() {
       setHasApiKey(s.has_api_key || false);
       setApiKeyMasked(s.api_key_masked || '');
       setHasJwt(s.has_jwt);
+      setAutoRefresh(!!s.auto_refresh_enabled);
+      setServiceEmailMasked(s.service_email_masked || '');
+      setJwtExpiresAt(s.jwt_expires_at || '');
+      setJwtStatus(s.jwt_status || '');
       setHasAnthropicKey(s.has_anthropic_key);
       setAnthropicKeyMasked(s.anthropic_key_masked || '');
       setCurrentAiModel(s.ai_model || 'claude-sonnet-4-6');
@@ -179,6 +189,37 @@ export default function Settings() {
     setSignInResult(null);
   };
 
+  const handleSaveServiceAccount = async () => {
+    setSigningIn(true);
+    setSignInResult(null);
+    try {
+      const res = await api.saveServiceAccount(email.trim(), password);
+      setSignInResult({ success: true, message: res.message || 'Auto-refresh enabled.' });
+      setAutoRefresh(true);
+      setServiceEmailMasked(maskEmailLocal(email.trim()));
+      setJwtStatus('ok');
+      setHasJwt(true);
+      setPassword('');
+    } catch (e: any) {
+      setSignInResult({ success: false, message: e?.message || 'Failed to enable auto-refresh.' });
+    } finally {
+      setSigningIn(false);
+    }
+  };
+
+  const handleRemoveServiceAccount = async () => {
+    try {
+      await api.removeServiceAccount();
+      setAutoRefresh(false);
+      setServiceEmailMasked('');
+      setJwtStatus('');
+      setJwtExpiresAt('');
+      setSignInResult(null);
+    } catch (e: any) {
+      setSignInResult({ success: false, message: e?.message || 'Failed to turn off auto-refresh.' });
+    }
+  };
+
   const handleSaveAnthropicKey = async () => {
     setSavingAi(true);
     setAiResult(null);
@@ -280,32 +321,51 @@ export default function Settings() {
         )}
       </div>
 
-      {/* User Authentication (JWT) */}
+      {/* User Authentication (JWT + auto-refresh) */}
       <div className="bg-gray-900 rounded-lg border border-gray-800 p-6 max-w-xl space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold">User Authentication</h3>
-          {hasJwt && (
+          {autoRefresh ? (
+            <span className="flex items-center gap-1.5 text-sm text-green-400">
+              <ShieldCheck size={16} /> Auto-refresh on
+            </span>
+          ) : hasJwt ? (
             <span className="flex items-center gap-1.5 text-sm text-green-400">
               <ShieldCheck size={16} /> Authenticated
             </span>
-          )}
+          ) : null}
         </div>
         <div className="text-sm text-gray-400 space-y-1">
-          <p>Authenticate to enable <strong className="text-gray-300">step-level testing</strong>.</p>
-          <p>This is <strong className="text-yellow-400">required</strong> for AP Cloud. Without it, tests will fall back to a less reliable webhook-based approach.</p>
+          <p>Authenticate to enable <strong className="text-gray-300">step-level testing</strong>. <strong className="text-yellow-400">Required</strong> for AP Cloud — without it, tests fall back to a less reliable webhook approach.</p>
         </div>
 
-        {hasJwt ? (
+        {jwtExpiresAt && (() => { const l = jwtExpiryLabel(jwtExpiresAt); return <p className={`text-sm ${l.tone}`}>{l.text}</p>; })()}
+        {jwtStatus.startsWith('needs_attention:') && (
+          <div className="bg-red-900/20 border border-red-800/40 rounded p-3 text-sm text-red-300">
+            Auto-refresh failed: {jwtStatus.slice('needs_attention:'.length)}. Re-enter your email &amp; password below.
+          </div>
+        )}
+
+        {autoRefresh ? (
           <div className="space-y-3">
             <div className="bg-green-900/20 border border-green-800/40 rounded p-3 text-sm text-green-300">
-              You are signed in. Step testing is enabled using your user session.
+              Auto-refresh is on for <strong>{serviceEmailMasked}</strong>. The app renews your session before it expires — no re-pasting, and scheduled runs keep working.
             </div>
-            <button onClick={handleSignOut} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium flex items-center gap-2">
-              <LogOut size={14} /> Sign Out
+            <button onClick={handleRemoveServiceAccount} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-medium flex items-center gap-2">
+              <LogOut size={14} /> Turn off auto-refresh
             </button>
           </div>
         ) : (
           <div className="space-y-3">
+            {hasJwt && (
+              <div className="flex items-center justify-between gap-3 bg-green-900/20 border border-green-800/40 rounded p-3 text-sm text-green-300">
+                <span>Signed in with a manual session.</span>
+                <button onClick={handleSignOut} className="shrink-0 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs font-medium flex items-center gap-1.5">
+                  <LogOut size={12} /> Sign Out
+                </button>
+              </div>
+            )}
+
             {/* Tab Switcher */}
             <div className="flex border-b border-gray-700">
               <button
@@ -314,7 +374,7 @@ export default function Settings() {
                   authMode === 'token' ? 'border-primary-500 text-primary-400' : 'border-transparent text-gray-400 hover:text-gray-300'
                 }`}
               >
-                Paste Token (recommended)
+                Paste Token
               </button>
               <button
                 onClick={() => { setAuthMode('password'); setSignInResult(null); }}
@@ -322,7 +382,7 @@ export default function Settings() {
                   authMode === 'password' ? 'border-primary-500 text-primary-400' : 'border-transparent text-gray-400 hover:text-gray-300'
                 }`}
               >
-                Email / Password
+                Email &amp; Password
               </button>
             </div>
 
@@ -343,6 +403,7 @@ export default function Settings() {
                     placeholder="eyJhbGciOiJIUzI1NiIs..."
                   />
                 </div>
+                <p className="text-xs text-gray-500">A pasted token expires and must be re-pasted. To stop re-pasting, use the <strong className="text-gray-400">Email &amp; Password</strong> tab with auto-refresh.</p>
                 <button
                   onClick={handleSignIn}
                   disabled={signingIn || !manualToken.trim()}
@@ -354,7 +415,6 @@ export default function Settings() {
               </div>
             ) : (
               <div className="space-y-3">
-                <p className="text-xs text-gray-500">Only works if you sign in with email/password (not Google SSO).</p>
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">Email</label>
                   <input
@@ -362,7 +422,7 @@ export default function Settings() {
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
+                    placeholder="piece-tester-bot@example.com"
                   />
                 </div>
                 <div>
@@ -372,17 +432,24 @@ export default function Settings() {
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Your AP dashboard password"
-                    onKeyDown={(e) => e.key === 'Enter' && handleSignIn()}
+                    placeholder="Account password"
+                    onKeyDown={(e) => e.key === 'Enter' && (rememberMe ? handleSaveServiceAccount() : handleSignIn())}
                   />
                 </div>
+                <label className="flex items-start gap-2 text-sm text-gray-300 cursor-pointer">
+                  <input type="checkbox" className="mt-0.5" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} />
+                  <span>
+                    Keep me signed in (auto-refresh)
+                    <span className="block text-xs text-gray-500">Stores the credentials encrypted and renews the session automatically — no re-pasting, and scheduled runs keep working. Needs an email/password account (not Google SSO), MFA off.</span>
+                  </span>
+                </label>
                 <button
-                  onClick={handleSignIn}
+                  onClick={rememberMe ? handleSaveServiceAccount : handleSignIn}
                   disabled={signingIn || !email || !password}
                   className="px-4 py-2 bg-primary-600 hover:bg-primary-700 rounded text-sm font-medium disabled:opacity-50 flex items-center gap-2"
                 >
-                  {signingIn ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />}
-                  Sign In to Activepieces
+                  {signingIn ? <Loader2 size={14} className="animate-spin" /> : rememberMe ? <ShieldCheck size={14} /> : <LogIn size={14} />}
+                  {rememberMe ? 'Enable auto-refresh' : 'Sign In'}
                 </button>
               </div>
             )}
@@ -561,6 +628,23 @@ export default function Settings() {
       <AiCostDashboard />
     </div>
   );
+}
+
+/** Mask an email as first-char + domain, e.g. "p…@activepieces.com" (mirrors the server). */
+function maskEmailLocal(v: string): string {
+  const at = v.indexOf('@');
+  if (at <= 0) return v ? '•••' : '';
+  return `${v[0]}…${v.slice(at)}`;
+}
+
+/** Human label + tone for a JWT expiry ISO timestamp. */
+function jwtExpiryLabel(iso: string): { text: string; tone: string } {
+  if (!iso) return { text: '', tone: 'text-gray-500' };
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return { text: 'Token expired — reconnect', tone: 'text-red-400' };
+  const hours = Math.floor(ms / (60 * 60 * 1000));
+  if (hours < 24) return { text: `Token expires in ${hours}h`, tone: 'text-yellow-400' };
+  return { text: `Token valid — expires in ${Math.floor(hours / 24)}d`, tone: 'text-green-400' };
 }
 
 function AiCostDashboard() {
