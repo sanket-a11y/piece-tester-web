@@ -15,13 +15,17 @@ const raw = {
   mcp_pkce_verifier: 'pkce-verifier-secret',
   mcp_oauth_state: 'oauth-state-secret',
   linear_report_webhook_url: 'https://cloud.activepieces.com/api/v1/webhooks/SECRETHOOK',
+  ap_service_email: 'user@activepieces.com',
+  ap_service_password: 'enc:supersecretencryptedpassword',
+  jwt_expiry: '2026-09-08T00:00:00.000Z',
+  jwt_auth_status: 'ok',
 };
 
 describe('maskedSettings', () => {
   it('never returns raw secrets', () => {
     const out = maskedSettings(raw) as any;
     const s = JSON.stringify(out);
-    for (const secret of ['sk-secretapikey12345', 'jwt-secret-value', 'sk-ant-supersecretkey', 'mcp-secret-token', 'mcp-access-secret', 'mcp-refresh-secret', 'pkce-verifier-secret', 'oauth-state-secret']) {
+    for (const secret of ['sk-secretapikey12345', 'jwt-secret-value', 'sk-ant-supersecretkey', 'mcp-secret-token', 'mcp-access-secret', 'mcp-refresh-secret', 'pkce-verifier-secret', 'oauth-state-secret', 'enc:supersecretencryptedpassword']) {
       expect(s).not.toContain(secret);
     }
     expect(out.api_key).toBeUndefined();
@@ -32,6 +36,8 @@ describe('maskedSettings', () => {
     expect(out.mcp_refresh_token).toBeUndefined();
     expect(out.mcp_pkce_verifier).toBeUndefined();
     expect(out.mcp_oauth_state).toBeUndefined();
+    expect(out.ap_service_password).toBeUndefined();
+    expect(out.ap_service_email).toBeUndefined();
   });
   it('exposes presence + masked hints', () => {
     const out = maskedSettings(raw) as any;

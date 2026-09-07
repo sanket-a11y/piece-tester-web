@@ -16,6 +16,10 @@ export interface SettingsForView {
   mcp_pkce_verifier: string;
   mcp_oauth_state: string;
   linear_report_webhook_url: string;
+  ap_service_email: string;
+  ap_service_password: string;
+  jwt_expiry: string;
+  jwt_auth_status: string;
 }
 
 /** Mask a secret as head…tail, but only when it is long enough that the
@@ -24,6 +28,13 @@ function maskLong(v: string, head: number, minLen: number): string {
   if (!v) return '';
   if (v.length <= minLen) return '••••••';
   return v.slice(0, head) + '...' + v.slice(-4);
+}
+
+/** Mask an email as first-char + domain, e.g. "p…@activepieces.com". */
+function maskEmail(v: string): string {
+  const at = v.indexOf('@');
+  if (at <= 0) return v ? '•••' : '';
+  return `${v[0]}…${v.slice(at)}`;
 }
 
 /**
@@ -48,5 +59,9 @@ export function maskedSettings(s: SettingsForView) {
     mcp_token_masked: s.mcp_token ? '...' + s.mcp_token.slice(-8) : '',
     has_linear_webhook: !!s.linear_report_webhook_url,
     linear_webhook_masked: maskLong(s.linear_report_webhook_url, 34, 40),
+    auto_refresh_enabled: !!(s.ap_service_email && s.ap_service_password),
+    service_email_masked: maskEmail(s.ap_service_email),
+    jwt_expires_at: s.jwt_expiry || '',
+    jwt_status: s.jwt_auth_status || '',
   };
 }
