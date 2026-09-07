@@ -19,6 +19,7 @@
 
 import type { PieceMetadataFull } from './ap-client.js';
 import { createClient } from './test-engine.js';
+import { ensureFreshJwt } from './auth-refresh.js';
 import { executeActionOnAP, resolveConnectionAuthInput } from './ai-config-generator.js';
 import type { ActivepiecesClient } from './ap-client.js';
 
@@ -98,6 +99,7 @@ export async function executeTriggerOnAP(
     throw new Error(`executeTriggerOnAP only handles TEST_FUNCTION. For SIMULATION use armTriggerSimulation + captureTriggerEvents.`);
   }
 
+  await ensureFreshJwt(); // keep the JWT fresh before trigger testing (test-trigger requires PrincipalType.USER)
   const apClient = createClient();
   if (!apClient.hasJwtToken()) throw new Error('JWT token required. Sign in via Settings first.');
 
@@ -131,6 +133,7 @@ export async function armTriggerSimulation(
   if (!pieceMeta.triggers[triggerName]) {
     throw new Error(`Trigger "${triggerName}" not found. Available: ${Object.keys(pieceMeta.triggers).join(', ')}`);
   }
+  await ensureFreshJwt(); // arm is the first JWT call for a webhook trigger — refresh before it
   const apClient = createClient();
   if (!apClient.hasJwtToken()) throw new Error('JWT token required. Sign in via Settings first.');
 
@@ -162,6 +165,7 @@ export async function captureTriggerEvents(
   timeoutMs = DEFAULT_CAPTURE_TIMEOUT_MS,
   onLog?: TriggerLog,
 ): Promise<TriggerSampleResult> {
+  await ensureFreshJwt(); // capture polls a JWT endpoint; keep the token fresh across the wait window
   const apClient = createClient();
   const start = Date.now();
   const deadline = start + timeoutMs;

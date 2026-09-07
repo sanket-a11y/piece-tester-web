@@ -4,6 +4,7 @@ import { getSettings, getConnectionByPiece } from '../db/queries.js';
 import type { PieceMetadataFull, PieceActionMeta } from './ap-client.js';
 import { ActivepiecesClient } from './ap-client.js';
 import { createClient } from './test-engine.js';
+import { ensureFreshJwt, isAuthError } from './auth-refresh.js';
 import { buildConnectionValue, makeExternalId } from './connection-builder.js';
 import { formatLessonsForPrompt } from './lesson-extractor.js';
 import { CostTracker } from '../agents/v2/cost-tracker.js';
@@ -563,6 +564,7 @@ export async function executeActionOnAP(pieceMeta: PieceMetadataFull, actionName
     throw new Error(`Action "${actionName}" not found. Available: ${Object.keys(pieceMeta.actions).join(', ')}`);
   }
 
+  await ensureFreshJwt(); // proactive refresh; throws JwtRefreshError with a clear reason if a stored sign-in fails
   const apClient = createClient();
   const { authInput, inputWithoutAuth } = await resolveConnectionAuthInput(apClient, pieceMeta, input);
 
@@ -586,7 +588,19 @@ export async function executeActionOnAP(pieceMeta: PieceMetadataFull, actionName
 
     if (!apClient.hasJwtToken()) throw new Error('JWT token required. Sign in via Settings first.');
 
-    const flowRun = await apClient.testStep(updatedFlow.version.id, 'step_1');
+    let flowRun;
+    try {
+      flowRun = await apClient.testStep(updatedFlow.version.id, 'step_1');
+    } catch (err) {
+      // A JWT invalidated before its exp (e.g. server-side logout) surfaces as 401/403.
+      // Force one re-sign-in and retry with a fresh client.
+      if (isAuthError(err)) {
+        await ensureFreshJwt({ force: true });
+        flowRun = await createClient().testStep(updatedFlow.version.id, 'step_1');
+      } else {
+        throw err;
+      }
+    }
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       const run = await apClient.getFlowRun(flowRun.id);

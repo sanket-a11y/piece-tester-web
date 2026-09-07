@@ -3,6 +3,8 @@ import { Router } from 'express';
 import { getSettings, updateSettings, getAiUsageSummary, getAiUsageBySession, getAiUsageByPiece, getAiUsageRecent } from '../db/queries.js';
 import { ActivepiecesClient } from '../services/ap-client.js';
 import { maskedSettings } from './settings-view.js';
+import { encryptSecret, hasEncryptionKey } from '../services/crypto-vault.js';
+import { decodeJwtExp } from '../services/jwt-util.js';
 
 // ── MCP OAuth constants ──
 const MCP_OAUTH_AUTHORIZE_URL = 'https://mcp.activepieces.com/authorize';
@@ -157,6 +159,41 @@ router.post('/save-token', async (req, res) => {
 /** Clear the stored JWT token */
 router.post('/sign-out', (_req, res) => {
   updateSettings({ jwt_token: '' });
+  res.json({ success: true });
+});
+
+/**
+ * Enable auto-refresh: store an AP email+password (encrypted) so the app can re-sign-in
+ * automatically. Validates the credentials by signing in once before storing anything.
+ */
+router.post('/service-account', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+  if (!hasEncryptionKey()) {
+    return res.status(400).json({ error: 'No encryption key configured. Set PIECE_TESTER_CRED_KEY (or SESSION_SECRET) on the server, then retry.' });
+  }
+  const s = getSettings();
+  try {
+    const result = await ActivepiecesClient.signIn(s.base_url, email, password);
+    const exp = decodeJwtExp(result.token);
+    updateSettings({
+      ap_service_email: email,
+      ap_service_password: encryptSecret(password),
+      jwt_token: result.token,
+      jwt_expiry: exp ? new Date(exp * 1000).toISOString() : '',
+      jwt_auth_status: 'ok',
+    });
+    res.json({ success: true, message: 'Auto-refresh enabled. The app will keep your session fresh automatically.' });
+  } catch (err) {
+    res.status(400).json({ success: false, error: ActivepiecesClient.formatError(err) });
+  }
+});
+
+/** Disable auto-refresh: forget the stored credentials. Any pasted JWT is left intact. */
+router.delete('/service-account', (_req, res) => {
+  updateSettings({ ap_service_email: '', ap_service_password: '', jwt_auth_status: '' });
   res.json({ success: true });
 });
 

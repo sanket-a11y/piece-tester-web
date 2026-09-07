@@ -21,6 +21,10 @@ export interface SettingsRow {
   mcp_pkce_verifier: string; // temporary during OAuth flow
   mcp_oauth_state: string;   // temporary CSRF state
   linear_report_webhook_url: string;
+  ap_service_email: string;
+  ap_service_password: string; // AES-256-GCM ciphertext (v1:iv:tag:data), never plaintext
+  jwt_expiry: string;          // ISO timestamp derived from the JWT exp claim
+  jwt_auth_status: string;     // '' | 'ok' | 'needs_attention:<reason>'
   updated_at: string;
 }
 
@@ -47,6 +51,10 @@ export function updateSettings(s: Partial<Omit<SettingsRow, 'id' | 'updated_at'>
       mcp_pkce_verifier = ?,
       mcp_oauth_state = ?,
       linear_report_webhook_url = ?,
+      ap_service_email = ?,
+      ap_service_password = ?,
+      jwt_expiry = ?,
+      jwt_auth_status = ?,
       updated_at = datetime('now')
     WHERE id = 1
   `, [
@@ -65,6 +73,10 @@ export function updateSettings(s: Partial<Omit<SettingsRow, 'id' | 'updated_at'>
     s.mcp_pkce_verifier ?? current.mcp_pkce_verifier,
     s.mcp_oauth_state ?? current.mcp_oauth_state,
     s.linear_report_webhook_url ?? current.linear_report_webhook_url,
+    s.ap_service_email ?? current.ap_service_email,
+    s.ap_service_password ?? current.ap_service_password,
+    s.jwt_expiry ?? current.jwt_expiry,
+    s.jwt_auth_status ?? current.jwt_auth_status,
   ]);
   return getSettings();
 }
