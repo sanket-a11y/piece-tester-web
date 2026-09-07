@@ -95,6 +95,22 @@ function initTables(db: DatabaseAdapter): void {
     db.exec(`ALTER TABLE settings ADD COLUMN linear_report_webhook_url TEXT NOT NULL DEFAULT ''`);
   }
 
+  // Migration: service-account auto-refresh columns (existing DBs).
+  // ap_service_password is stored AES-256-GCM-encrypted (see crypto-vault.ts).
+  const cols5 = db.pragma(`table_info(settings)`) as { name: string }[];
+  if (!cols5.some(c => c.name === 'ap_service_email')) {
+    db.exec(`ALTER TABLE settings ADD COLUMN ap_service_email TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!cols5.some(c => c.name === 'ap_service_password')) {
+    db.exec(`ALTER TABLE settings ADD COLUMN ap_service_password TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!cols5.some(c => c.name === 'jwt_expiry')) {
+    db.exec(`ALTER TABLE settings ADD COLUMN jwt_expiry TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!cols5.some(c => c.name === 'jwt_auth_status')) {
+    db.exec(`ALTER TABLE settings ADD COLUMN jwt_auth_status TEXT NOT NULL DEFAULT ''`);
+  }
+
   // Migration: add ai_config_meta column to piece_connections if missing
   const connCols = db.pragma(`table_info(piece_connections)`) as { name: string }[];
   // (table may not exist yet — the CREATE TABLE below creates it; run migration only if table exists)
