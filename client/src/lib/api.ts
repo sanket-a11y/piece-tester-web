@@ -895,7 +895,40 @@ export interface BatchQueueItemStatus {
   pieceDisplayName: string;
   actionName: string;
   actionDisplayName: string;
+  targetType: 'action' | 'trigger';
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
+}
+
+export interface SetupRunSummary {
+  id: number;
+  status: 'running' | 'done' | 'cancelled';
+  cadence: string;
+  piece_count: number;
+  target_count: number;
+  plans_created: number;
+  plans_skipped: number;
+  plans_errored: number;
+  schedules_created: number;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface SetupRunItem {
+  id: number;
+  piece_name: string;
+  piece_display_name: string;
+  target_type: 'action' | 'trigger';
+  target_name: string;
+  target_display_name: string;
+  status: 'pending' | 'running' | 'done' | 'skipped' | 'error';
+  plan_id: number | null;
+  error: string | null;
+}
+
+export interface ScheduleConfigInput {
+  enabled: boolean;
+  cadence: 'monthly' | '6h' | 'daily' | 'weekly' | 'custom' | 'none';
+  customCron?: string;
 }
 
 export interface BatchStatus {
@@ -1175,11 +1208,14 @@ export const api = {
     request<{ success: boolean; deleted: number }>('DELETE', `/test-plans/runs${before ? `?before=${encodeURIComponent(before)}` : ''}`),
 
   // Batch Setup
-  startBatchSetup: (pieceNames: string[]) =>
-    request<{ id: string; totalItems: number; pendingItems: number; skippedItems: number }>('POST', '/batch-setup/start', { pieceNames }),
+  startBatchSetup: (pieceNames: string[], schedule?: ScheduleConfigInput) =>
+    request<{ id: string; setupRunId: number; totalItems: number; pendingItems: number; skippedItems: number }>('POST', '/batch-setup/start', { pieceNames, schedule }),
   getBatchStatus: () => request<BatchStatus | null>('GET', '/batch-setup/status'),
   subscribeBatchSetup,
   cancelBatchSetup: () => request<{ success: boolean }>('POST', '/batch-setup/cancel'),
+  getSetupRuns: () => request<SetupRunSummary[]>('GET', '/batch-setup/runs'),
+  getSetupRunDetail: (id: number) =>
+    request<{ run: SetupRunSummary; items: SetupRunItem[] }>('GET', `/batch-setup/runs/${id}`),
 
   // Global plan run history
   listAllPlanRuns: (options?: { pieceName?: string; limit?: number; offset?: number }) => {
