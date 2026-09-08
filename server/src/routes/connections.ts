@@ -3,6 +3,8 @@ import * as db from '../db/queries.js';
 import { createClient } from '../services/test-engine.js';
 import { ActivepiecesClient } from '../services/ap-client.js';
 import { getSettings } from '../db/queries.js';
+import { sweepTestConnections } from '../services/connection-sweep.js';
+import { classify } from '../services/test-connection-matcher.js';
 
 const router = Router();
 
@@ -48,6 +50,34 @@ router.get('/remote/:pieceName', async (req, res) => {
     const remote = await client.listConnections();
     const filtered = remote.filter(c => c.pieceName === req.params.pieceName);
     res.json(filtered);
+  } catch (err) {
+    res.status(500).json({ error: ActivepiecesClient.formatError(err) });
+  }
+});
+
+// Per-piece auto-detect: classify the piece against the live AP connection list (name-only).
+router.get('/remote/:pieceName/test-match', async (req, res) => {
+  try {
+    const client = createClient();
+    const remote = await client.listConnections();
+    res.json(classify(req.params.pieceName, remote));
+  } catch (err) {
+    res.status(500).json({ error: ActivepiecesClient.formatError(err) });
+  }
+});
+
+// Bulk sweep: link every missing test connection by naming convention.
+// body: { pieceNames?: string[] } — when omitted, sweeps the full catalog.
+router.post('/sweep', async (req, res) => {
+  try {
+    const client = createClient();
+    let pieceNames: string[] | undefined = req.body?.pieceNames;
+    if (!Array.isArray(pieceNames) || pieceNames.length === 0) {
+      const pieces = await client.listPieces();
+      pieceNames = pieces.map(p => p.name);
+    }
+    const result = await sweepTestConnections(client, pieceNames);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: ActivepiecesClient.formatError(err) });
   }
