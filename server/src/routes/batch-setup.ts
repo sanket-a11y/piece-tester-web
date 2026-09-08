@@ -4,7 +4,8 @@ import { createTestPlanWithAi, fixTestPlanWithAi, type AgentLogEntry } from '../
 import { createTriggerTestPlanV2 } from '../agents/v2/index.js';
 import {
   createTestPlan, updateTestPlan, listTestPlans,
-  createSetupRun, addSetupRunItems, updateSetupRunItem, finalizeSetupRun, getSetupRun,
+  createSetupRun, addSetupRunItems, updateSetupRunItem, finalizeSetupRun,
+  getSetupRun, listSetupRuns, listSetupRunItems,
 } from '../db/queries.js';
 import { executePlan } from '../services/plan-executor.js';
 import { extractAndStoreLessons } from '../services/lesson-extractor.js';
@@ -351,6 +352,17 @@ router.post('/cancel', (_req, res) => {
     return res.status(404).json({ error: 'No running batch to cancel' });
   }
   res.json({ success: true });
+});
+
+// ── Setup run history ──
+router.get('/runs', (_req, res) => {
+  res.json(listSetupRuns());
+});
+
+router.get('/runs/:id', (req, res) => {
+  const run = getSetupRun(parseInt(req.params.id));
+  if (!run) return res.status(404).json({ error: 'Setup run not found' });
+  res.json({ run, items: listSetupRunItems(run.id) });
 });
 
 export default router;
