@@ -95,7 +95,7 @@ export default function CoverageCockpit() {
   async function genPlans(pieces: string[]) {
     setBusy(true); setNote(null);
     try {
-      await api.startBatchSetup(pieces);
+      await api.startBatchSetup(pieces.map(pieceName => ({ pieceName })));
       navigate('/batch-setup');
     } catch (e: any) {
       setNote(e?.message ? `Error: ${e.message}` : 'Could not start plan generation.');

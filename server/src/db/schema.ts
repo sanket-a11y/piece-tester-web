@@ -235,6 +235,37 @@ function initTables(db: DatabaseAdapter): void {
       wave_id TEXT,        -- groups all runs from a single schedule fire; NULL for manual runs
       schedule_id INTEGER  -- which schedule fired this run; NULL for manual runs
     );
+
+    CREATE TABLE IF NOT EXISTS setup_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      status TEXT NOT NULL DEFAULT 'running',
+      cadence TEXT NOT NULL DEFAULT 'none',
+      cron_template TEXT NOT NULL DEFAULT '',
+      config TEXT NOT NULL DEFAULT '{}',
+      schedule_ids TEXT NOT NULL DEFAULT '[]',
+      piece_count INTEGER NOT NULL DEFAULT 0,
+      target_count INTEGER NOT NULL DEFAULT 0,
+      plans_created INTEGER NOT NULL DEFAULT 0,
+      plans_skipped INTEGER NOT NULL DEFAULT 0,
+      plans_errored INTEGER NOT NULL DEFAULT 0,
+      schedules_created INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS setup_run_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      setup_run_id INTEGER NOT NULL REFERENCES setup_runs(id) ON DELETE CASCADE,
+      piece_name TEXT NOT NULL,
+      piece_display_name TEXT NOT NULL DEFAULT '',
+      target_type TEXT NOT NULL DEFAULT 'action',
+      target_name TEXT NOT NULL,
+      target_display_name TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      plan_id INTEGER,
+      error TEXT
+    );
   `);
 
   db.exec(`
