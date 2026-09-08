@@ -103,6 +103,26 @@ Unchanged: sequential processing (one target at a time, API-limit friendly);
 already-planned targets marked `skipped`; auto-test + up-to-3 AI-fix loop that
 promotes a plan to `approved`.
 
+### Addendum (2026-09-08): per-target selection
+
+The Generate step selects at the **target** level, defaulting to all. Each piece
+row expands (lazy `GET /pieces/:name`) to a checklist of its actions + triggers,
+all checked by default; deselecting some makes the piece checkbox indeterminate,
+deselecting all drops the piece.
+
+- **Contract:** the `/start` payload is `selections: { pieceName; targets? }[]`
+  where a selection's `targets` (array of `{type:'action'|'trigger', name}`) is
+  **omitted = all**, **present (even `[]`) = exactly those**. Legacy `pieceNames`
+  is still accepted (mapped to all-targets) so other callers (e.g. CoverageCockpit)
+  keep working.
+- **Server:** a pure `itemsForSelection(pieceMeta, selection, existingTargets)`
+  (`services/batch-selection.ts`, unit-tested) builds the queue items — keying on
+  `targets` *presence*, not length, so an empty array enqueues nothing (never
+  "all"). `config.pieceNames` = distinct piece names for schedule eligibility.
+- **Client:** the payload is built from a captured `pieceTargetKeys` map (recorded
+  when a target is toggled), not the transient React-Query cache — so a piece
+  filtered out of view can never emit a truncated/empty target list.
+
 ## Schedule stage
 
 For each piece that got **≥1 approved plan** in this run **and has no existing
