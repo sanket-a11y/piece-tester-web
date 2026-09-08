@@ -1826,3 +1826,132 @@ export function getCoverageCounts(): { covered_total: number; covered_untested: 
   for (const p of covered) if (!approved.has(p)) untested++;
   return { covered_total: covered.size, covered_untested: untested };
 }
+
+// ── Setup runs ──
+
+export interface SetupRunRow {
+  id: number;
+  status: 'running' | 'done' | 'cancelled';
+  cadence: string;
+  cron_template: string;
+  config: string;
+  schedule_ids: string;
+  piece_count: number;
+  target_count: number;
+  plans_created: number;
+  plans_skipped: number;
+  plans_errored: number;
+  schedules_created: number;
+  started_at: string;
+  completed_at: string | null;
+  created_at: string;
+}
+
+export interface SetupRunItemRow {
+  id: number;
+  setup_run_id: number;
+  piece_name: string;
+  piece_display_name: string;
+  target_type: 'action' | 'trigger';
+  target_name: string;
+  target_display_name: string;
+  status: 'pending' | 'running' | 'done' | 'skipped' | 'error';
+  plan_id: number | null;
+  error: string | null;
+}
+
+export function createSetupRun(p: { cadence: string; cron_template: string; config: string }): SetupRunRow {
+  const r = getDb().run(
+    `INSERT INTO setup_runs (cadence, cron_template, config) VALUES (?, ?, ?)`,
+    [p.cadence, p.cron_template, p.config],
+  );
+  return getSetupRun(r.lastId)!;
+}
+
+export function getSetupRun(id: number): SetupRunRow | undefined {
+  return getDb().get<SetupRunRow>('SELECT * FROM setup_runs WHERE id = ?', [id]);
+}
+
+export function listSetupRuns(limit = 50): SetupRunRow[] {
+  return getDb().all<SetupRunRow>('SELECT * FROM setup_runs ORDER BY id DESC LIMIT ?', [limit]);
+}
+
+export function addSetupRunItems(
+  setupRunId: number,
+  items: Omit<SetupRunItemRow, 'id' | 'setup_run_id' | 'plan_id' | 'error'>[],
+): SetupRunItemRow[] {
+  const db = getDb();
+  return db.transaction(() => {
+    const out: SetupRunItemRow[] = [];
+    for (const it of items) {
+      const r = db.run(
+        `INSERT INTO setup_run_items
+           (setup_run_id, piece_name, piece_display_name, target_type, target_name, target_display_name, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [setupRunId, it.piece_name, it.piece_display_name, it.target_type, it.target_name, it.target_display_name, it.status],
+      );
+      out.push(getSetupRunItem(r.lastId)!);
+    }
+    return out;
+  });
+}
+
+export function getSetupRunItem(id: number): SetupRunItemRow | undefined {
+  return getDb().get<SetupRunItemRow>('SELECT * FROM setup_run_items WHERE id = ?', [id]);
+}
+
+export function listSetupRunItems(setupRunId: number): SetupRunItemRow[] {
+  return getDb().all<SetupRunItemRow>('SELECT * FROM setup_run_items WHERE setup_run_id = ? ORDER BY id', [setupRunId]);
+}
+
+export function updateSetupRunItem(
+  id: number,
+  patch: { status?: SetupRunItemRow['status']; plan_id?: number | null; error?: string | null },
+): void {
+  const cur = getSetupRunItem(id);
+  if (!cur) return;
+  getDb().run(
+    `UPDATE setup_run_items SET status = ?, plan_id = ?, error = ? WHERE id = ?`,
+    [
+      patch.status ?? cur.status,
+      patch.plan_id !== undefined ? patch.plan_id : cur.plan_id,
+      patch.error !== undefined ? patch.error : cur.error,
+      id,
+    ],
+  );
+}
+
+export function finalizeSetupRun(
+  id: number,
+  patch: { status: 'done' | 'cancelled'; schedule_ids?: number[]; schedules_created?: number },
+): SetupRunRow | undefined {
+  const db = getDb();
+  return db.transaction(() => {
+    const agg = db.get<{ total: number; pieces: number; done: number; skipped: number; errored: number }>(
+      `SELECT COUNT(*) AS total,
+              COUNT(DISTINCT piece_name) AS pieces,
+              SUM(CASE WHEN status = 'done'    THEN 1 ELSE 0 END) AS done,
+              SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped,
+              SUM(CASE WHEN status = 'error'   THEN 1 ELSE 0 END) AS errored
+         FROM setup_run_items WHERE setup_run_id = ?`,
+      [id],
+    )!;
+    db.run(
+      `UPDATE setup_runs SET
+         status = ?, completed_at = datetime('now'),
+         target_count = ?, piece_count = ?,
+         plans_created = ?, plans_skipped = ?, plans_errored = ?,
+         schedule_ids = ?, schedules_created = ?
+       WHERE id = ?`,
+      [
+        patch.status,
+        agg.total ?? 0, agg.pieces ?? 0,
+        agg.done ?? 0, agg.skipped ?? 0, agg.errored ?? 0,
+        JSON.stringify(patch.schedule_ids ?? []),
+        patch.schedules_created ?? 0,
+        id,
+      ],
+    );
+    return getSetupRun(id);
+  });
+}
