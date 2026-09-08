@@ -27,6 +27,11 @@ export default function Connections() {
     mutationFn: (id: number) => api.activateConnection(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['connections'] }),
   });
+  const [sweepResult, setSweepResult] = useState<any>(null);
+  const sweepMut = useMutation({
+    mutationFn: () => api.sweepConnections(),
+    onSuccess: (res) => { setSweepResult(res); qc.invalidateQueries({ queryKey: ['connections'] }); },
+  });
 
   function resetForm() {
     setShowForm(false);
@@ -52,6 +57,40 @@ export default function Connections() {
 
   return (
     <div>
+      <div className="mb-4 space-y-3">
+        <button onClick={() => sweepMut.mutate()} disabled={sweepMut.isPending}
+          className="flex items-center gap-2 px-4 py-2 bg-primary-600 hover:bg-primary-700 rounded-lg text-sm font-medium disabled:opacity-50">
+          {sweepMut.isPending ? 'Linking…' : 'Auto-link test connections'}
+        </button>
+        {sweepMut.error && <p className="text-sm text-red-400">{(sweepMut.error as Error).message}</p>}
+        {sweepResult && (
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 text-sm space-y-2">
+            <p className="text-green-400">Linked {sweepResult.linked.length}</p>
+            <p className="text-gray-400">Already linked {sweepResult.alreadyLinked.length}</p>
+            <p className="text-gray-400">No match {sweepResult.skippedNone.length}</p>
+            {sweepResult.errored?.length > 0 && (
+              <div className="text-red-400">
+                <p>Errored {sweepResult.errored.length}:</p>
+                <ul className="list-disc ml-5 text-xs">
+                  {sweepResult.errored.map((s: any) => (
+                    <li key={s.pieceName}>{s.pieceName}: {s.error}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {sweepResult.skippedAmbiguous.length > 0 && (
+              <div className="text-amber-300">
+                <p>Ambiguous {sweepResult.skippedAmbiguous.length} — resolve manually:</p>
+                <ul className="list-disc ml-5 text-xs">
+                  {sweepResult.skippedAmbiguous.map((s: any) => (
+                    <li key={s.pieceName}>{s.pieceName}: {(s.candidates || []).join(', ')}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-baseline gap-2">
           <h2 className="text-2xl font-bold">Connections</h2>

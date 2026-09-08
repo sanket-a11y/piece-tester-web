@@ -23,13 +23,20 @@ const TIMEOUT_FAIL = JSON.stringify([
   { stepId: 'call', label: 'Call API', status: 'failed', error: 'Request timed out after 90s', duration_ms: 90000 },
 ]);
 
+// A naive "YYYY-MM-DD HH:MM:SS" timestamp n days before now. Lane assertions must anchor to the
+// real now: the service reads wall-clock now (not injectable like the classifier), and a piece
+// goes `stale` once its newest run is older than staleDays (14). Fixed calendar dates would rot.
+function daysAgo(n: number): string {
+  return new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 19).replace('T', ' ');
+}
+
 describe('getPieceRegressions', () => {
   beforeEach(() => getDb().exec('DELETE FROM test_plan_runs; DELETE FROM test_plans;'));
 
   it('classifies a piece that just broke, with its failure count and reliability', () => {
     const plan = seedPlan('newbroke', 'do_thing');
-    for (let d = 15; d <= 19; d++) seedRun(plan, 'completed', `2026-08-${d} 10:00:00`);
-    for (let d = 20; d <= 24; d++) seedRun(plan, 'failed', `2026-08-${d} 10:00:00`, AUTH_FAIL);
+    for (let n = 10; n >= 6; n--) seedRun(plan, 'completed', daysAgo(n));        // older 5: passing
+    for (let n = 5; n >= 1; n--) seedRun(plan, 'failed', daysAgo(n), AUTH_FAIL); // newest 5: failing
 
     const row = getPieceRegressions().find(r => r.piece_name === 'newbroke')!;
     expect(row.lane).toBe('newly_broken');
@@ -39,7 +46,7 @@ describe('getPieceRegressions', () => {
 
   it('classifies a consistently passing piece as stable', () => {
     const plan = seedPlan('steady', 'ok');
-    for (let d = 20; d <= 25; d++) seedRun(plan, 'completed', `2026-08-${d} 10:00:00`);
+    for (let n = 6; n >= 1; n--) seedRun(plan, 'completed', daysAgo(n));
     const row = getPieceRegressions().find(r => r.piece_name === 'steady')!;
     expect(row.lane).toBe('stable');
     expect(row.overallRate).toBe(100);
@@ -89,11 +96,11 @@ describe('getPerformanceSummary', () => {
 
   it('reports overall rate, blocked count, tested pieces and lane tallies', () => {
     const a = seedPlan('alpha', 'x');
-    for (let d = 20; d <= 25; d++) seedRun(a, 'completed', `2026-08-${d} 10:00:00`);
+    for (let n = 6; n >= 1; n--) seedRun(a, 'completed', daysAgo(n));                 // stable
     const b = seedPlan('beta', 'y');
-    for (let d = 15; d <= 19; d++) seedRun(b, 'completed', `2026-08-${d} 10:00:00`);
-    for (let d = 20; d <= 24; d++) seedRun(b, 'failed', `2026-08-${d} 10:00:00`, AUTH_FAIL);
-    seedRun(b, 'blocked', '2026-08-25 10:00:00');
+    for (let n = 11; n >= 7; n--) seedRun(b, 'completed', daysAgo(n));                // older 5: passing
+    for (let n = 6; n >= 2; n--) seedRun(b, 'failed', daysAgo(n), AUTH_FAIL);         // newest 5 decided: failing
+    seedRun(b, 'blocked', daysAgo(1));                                                // newest run overall, ignored in rate
 
     const s = getPerformanceSummary();
     expect(s.tested_pieces).toBe(2);
