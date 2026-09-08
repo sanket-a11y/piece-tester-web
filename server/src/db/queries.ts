@@ -1927,6 +1927,15 @@ export function finalizeSetupRun(
 ): SetupRunRow | undefined {
   const db = getDb();
   return db.transaction(() => {
+    // A cancel can leave items mid-flight ('running'/'pending') because the loop breaks
+    // before their row is closed. Force them to 'error' so the aggregate below counts them.
+    if (patch.status === 'cancelled') {
+      db.run(
+        `UPDATE setup_run_items SET status = 'error', error = 'Cancelled'
+           WHERE setup_run_id = ? AND status IN ('running', 'pending')`,
+        [id],
+      );
+    }
     const agg = db.get<{ total: number; pieces: number; done: number; skipped: number; errored: number }>(
       `SELECT COUNT(*) AS total,
               COUNT(DISTINCT piece_name) AS pieces,

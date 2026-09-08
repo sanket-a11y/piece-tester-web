@@ -39,6 +39,28 @@ describe('setup-run queries', () => {
     expect(getSetupRun(run.id)!.status).toBe('done');
   });
 
+  it('finalize(cancelled) closes still-open items and counts them as errored', () => {
+    const run = createSetupRun({ cadence: 'monthly', cron_template: '', config: '{}' });
+    const [running, pending, done] = addSetupRunItems(run.id, [
+      { piece_name: 'p1', piece_display_name: 'P1', target_type: 'action', target_name: 'a1', target_display_name: 'A1', status: 'running' },
+      { piece_name: 'p1', piece_display_name: 'P1', target_type: 'trigger', target_name: 't1', target_display_name: 'T1', status: 'pending' },
+      { piece_name: 'p2', piece_display_name: 'P2', target_type: 'action', target_name: 'a2', target_display_name: 'A2', status: 'done' },
+    ]);
+
+    const final = finalizeSetupRun(run.id, { status: 'cancelled' });
+    expect(final!.status).toBe('cancelled');
+    expect(final!.plans_errored).toBe(2);
+
+    const runningAfter = getSetupRunItem(running.id)!;
+    const pendingAfter = getSetupRunItem(pending.id)!;
+    expect(runningAfter.status).toBe('error');
+    expect(runningAfter.error).toBe('Cancelled');
+    expect(pendingAfter.status).toBe('error');
+    expect(pendingAfter.error).toBe('Cancelled');
+    // A finished item is left untouched.
+    expect(getSetupRunItem(done.id)!.status).toBe('done');
+  });
+
   it('updateSetupRunItem partial-patch preserves fields not in the patch', () => {
     const run = createSetupRun({ cadence: 'weekly', cron_template: '0 0 * * 1', config: '{}' });
     const [item] = addSetupRunItems(run.id, [

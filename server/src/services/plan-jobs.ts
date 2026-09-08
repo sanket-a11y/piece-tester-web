@@ -23,10 +23,12 @@ export interface PlanJob {
 export interface BatchQueueItem {
   pieceName: string;
   pieceDisplayName: string;
-  actionName: string;
-  actionDisplayName: string;
+  actionName: string;            // holds the target name (action OR trigger)
+  actionDisplayName: string;     // holds the target displayName
+  targetType: 'action' | 'trigger';
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
   error?: string;
+  setupItemId?: number;          // row id in setup_run_items
 }
 
 export interface BatchQueue {
@@ -39,6 +41,7 @@ export interface BatchQueue {
   emitter: EventEmitter;
   events: PlanJobEvent[];
   cancelled: boolean;
+  setupRunId?: number;
 }
 
 const activeJobs = new Map<string, PlanJob>();
@@ -259,7 +262,7 @@ export function getBatchQueueStatus(): {
     completedAt: q.completedAt,
     currentIndex: q.currentIndex,
     totalItems: q.items.length,
-    items: q.items.map(i => ({ pieceName: i.pieceName, pieceDisplayName: i.pieceDisplayName, actionName: i.actionName, actionDisplayName: i.actionDisplayName, status: i.status })),
+    items: q.items.map(i => ({ pieceName: i.pieceName, pieceDisplayName: i.pieceDisplayName, actionName: i.actionName, actionDisplayName: i.actionDisplayName, targetType: i.targetType, status: i.status })),
     stats,
   };
 }
