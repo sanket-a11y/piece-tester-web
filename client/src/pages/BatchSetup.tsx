@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api, type AgentLogEntry, type BatchStatus, type BatchQueueItemStatus } from '../lib/api';
 import {
@@ -19,10 +19,16 @@ const STATUS_BADGE: Record<ItemStatus, { icon: JSX.Element; label: string; cls: 
 };
 
 export default function BatchSetup() {
+  const qc = useQueryClient();
   const navigate = useNavigate();
   const { data: pieces, isLoading: loadingPieces } = useQuery({ queryKey: ['pieces'], queryFn: api.listPieces });
   const { data: connections } = useQuery({ queryKey: ['connections'], queryFn: api.listConnections });
   const { data: allPlans } = useQuery({ queryKey: ['testPlans'], queryFn: () => api.listTestPlans() });
+
+  const sweepMut = useMutation({
+    mutationFn: () => api.sweepConnections(),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['connections'] }); qc.invalidateQueries({ queryKey: ['pieces'] }); },
+  });
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
@@ -370,7 +376,12 @@ export default function BatchSetup() {
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
           <Puzzle size={40} className="mx-auto text-gray-600 mb-3" />
           <p className="text-gray-400 mb-2">No connected pieces found.</p>
-          <p className="text-gray-500 text-sm">Go to <button onClick={() => navigate('/connections')} className="text-primary-400 hover:underline">Connections</button> and connect at least one piece first.</p>
+          <p className="text-gray-500 text-sm mb-4">Auto-link the test connections already set up in Activepieces, or go to <button onClick={() => navigate('/connections')} className="text-primary-400 hover:underline">Connections</button> to connect pieces manually.</p>
+          <button onClick={() => sweepMut.mutate()} disabled={sweepMut.isPending}
+            className="px-4 py-2 text-sm bg-primary-600 hover:bg-primary-700 rounded-lg font-medium disabled:opacity-50">
+            {sweepMut.isPending ? 'Linking…' : 'Auto-link test connections'}
+          </button>
+          {sweepMut.error && <p className="text-sm text-red-400 mt-3">{(sweepMut.error as Error).message}</p>}
         </div>
       ) : (
         <>
@@ -395,6 +406,10 @@ export default function BatchSetup() {
             </button>
             <button onClick={selectNone} className="px-3 py-2 text-sm text-gray-400 hover:text-gray-300 hover:bg-gray-800 rounded-lg transition-colors">
               Clear
+            </button>
+            <button onClick={() => sweepMut.mutate()} disabled={sweepMut.isPending}
+              className="px-3 py-2 text-sm text-green-400 hover:text-green-300 hover:bg-gray-800 rounded-lg transition-colors">
+              {sweepMut.isPending ? 'Linking…' : 'Auto-link test connections'}
             </button>
           </div>
 

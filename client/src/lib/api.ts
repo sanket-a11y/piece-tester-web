@@ -999,6 +999,8 @@ export const api = {
     request<any>('PATCH', `/connections/${connId}/actions-bulk`, data),
   listRemoteConnections: () => request<any[]>('GET', '/connections/remote'),
   listRemoteConnectionsForPiece: (pieceName: string) => request<any[]>('GET', `/connections/remote/${encodeURIComponent(pieceName)}`),
+  testMatchConnection: (pieceName: string) => request<any>('GET', `/connections/remote/${encodeURIComponent(pieceName)}/test-match`),
+  sweepConnections: (pieceNames?: string[]) => request<any>('POST', '/connections/sweep', pieceNames && pieceNames.length ? { pieceNames } : {}),
   importConnection: (data: any) => request<any>('POST', '/connections/import', data),
   getApDashboardUrl: () => request<{ dashboardUrl: string; projectId: string }>('GET', '/connections/ap-dashboard-url'),
   createConnection: (data: any) => request<any>('POST', '/connections', data),
