@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { api, type AgentLogEntry, type BatchStatus, type BatchQueueItemStatus, type ScheduleConfigInput, type SetupRunItem } from '../lib/api';
+import { api, type AgentLogEntry, type BatchStatus, type BatchQueueItemStatus, type ScheduleConfigInput, type SetupRunItem, type BatchSelection } from '../lib/api';
 import { ScheduleStep } from '../components/ScheduleStep';
 import { SetupRunHistory } from '../components/SetupRunHistory';
 import {
@@ -37,6 +37,19 @@ const STATUS_BADGE: Record<ItemStatus, { icon: JSX.Element; label: string; cls: 
   skipped:  { icon: <SkipForward size={12} />,   label: 'Skipped',  cls: 'text-yellow-300 bg-yellow-500/20' },
 };
 
+/** Ordered targets (actions then triggers) from full piece metadata. */
+function pieceTargetList(meta: any): { type: 'action' | 'trigger'; name: string; displayName: string; key: string }[] {
+  if (!meta) return [];
+  const out: { type: 'action' | 'trigger'; name: string; displayName: string; key: string }[] = [];
+  for (const [name, m] of Object.entries(meta.actions || {})) {
+    out.push({ type: 'action', name, displayName: (m as any)?.displayName || name, key: `action:${name}` });
+  }
+  for (const [name, m] of Object.entries(meta.triggers || {})) {
+    out.push({ type: 'trigger', name, displayName: (m as any)?.displayName || name, key: `trigger:${name}` });
+  }
+  return out;
+}
+
 export default function BatchSetup() {
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -51,6 +64,12 @@ export default function BatchSetup() {
   });
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Per-piece EXCLUDED target keys ('action:<name>' / 'trigger:<name>'). Absent/empty = all targets included.
+  const [deselectedTargets, setDeselectedTargets] = useState<Record<string, Set<string>>>({});
+  // Per-piece FULL target key list, recorded when a piece is expanded. Source of truth at Start
+  // (the ['piece', name] query cache can be evicted, so never build the payload from it).
+  const [pieceTargetKeys, setPieceTargetKeys] = useState<Record<string, string[]>>({});
+  const [expandedSelect, setExpandedSelect] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
 
   // Wizard state
@@ -154,11 +173,47 @@ export default function BatchSetup() {
     } catch {}
   }
 
+  function clearDeselected(pieceName: string) {
+    setDeselectedTargets(prev => {
+      if (!prev[pieceName]) return prev;
+      const next = { ...prev };
+      delete next[pieceName];
+      return next;
+    });
+  }
+
   function togglePiece(pieceName: string) {
+    const isChecked = selected.has(pieceName) && (deselectedTargets[pieceName]?.size ?? 0) === 0;
     setSelected(prev => {
       const next = new Set(prev);
-      if (next.has(pieceName)) next.delete(pieceName);
+      // Unchecked (fully off) or indeterminate → select all; fully checked → deselect all.
+      if (isChecked) next.delete(pieceName);
       else next.add(pieceName);
+      return next;
+    });
+    clearDeselected(pieceName);
+  }
+
+  /** Toggle a single target key ('action:<name>' / 'trigger:<name>') for a piece. */
+  function toggleTarget(pieceName: string, key: string, allKeys: string[]) {
+    // Record the full target list now — it must survive query-cache eviction to build the Start payload.
+    setPieceTargetKeys(prev => ({ ...prev, [pieceName]: allKeys }));
+    setDeselectedTargets(prev => {
+      const cur = new Set(prev[pieceName] ?? []);
+      if (cur.has(key)) cur.delete(key);
+      else cur.add(key);
+
+      const allDeselected = allKeys.length > 0 && allKeys.every(k => cur.has(k));
+      setSelected(sel => {
+        const nextSel = new Set(sel);
+        if (allDeselected) nextSel.delete(pieceName);
+        else nextSel.add(pieceName);
+        return nextSel;
+      });
+
+      const next = { ...prev };
+      if (cur.size === 0) delete next[pieceName];
+      else next[pieceName] = cur;
       return next;
     });
   }
@@ -166,10 +221,12 @@ export default function BatchSetup() {
   function selectAll() {
     const available = getConnectedPieces();
     setSelected(new Set(available.map((p: any) => p.name)));
+    setDeselectedTargets({});
   }
 
   function selectNone() {
     setSelected(new Set());
+    setDeselectedTargets({});
   }
 
   function getConnectedPieces() {
@@ -183,7 +240,21 @@ export default function BatchSetup() {
     setBatchLogs({});
     setSchedulesCreated(null);
     try {
-      await api.startBatchSetup(Array.from(selected), schedule);
+      const keyToTarget = (key: string) => {
+        const idx = key.indexOf(':');
+        return { type: key.slice(0, idx) as 'action' | 'trigger', name: key.slice(idx + 1) };
+      };
+      const selections: BatchSelection[] = Array.from(selected).map(pieceName => {
+        const deselected = deselectedTargets[pieceName];
+        if (!deselected || deselected.size === 0) return { pieceName };
+        // Build from the recorded full key list — NOT the query cache, which may be evicted.
+        const keys = pieceTargetKeys[pieceName];
+        // Defensive: a deselected set with no recorded keys should not happen; send all rather than none.
+        if (!keys) return { pieceName };
+        const targets = keys.filter(k => !deselected.has(k)).map(keyToTarget);
+        return { pieceName, targets };
+      });
+      await api.startBatchSetup(selections, schedule);
       const status = await api.getBatchStatus();
       if (status) {
         setBatchStatus(status);
@@ -352,8 +423,8 @@ export default function BatchSetup() {
           {!batchStatus ? (
             <>
               <p className="text-gray-400 text-sm mb-4">
-                Select pieces to generate AI test plans for all their actions and triggers. Plans are created one at
-                a time to avoid API limits. Already-planned targets are skipped.
+                Select pieces to generate AI test plans for their actions and triggers. Expand a piece to pick
+                individual targets. Plans are created one at a time to avoid API limits. Already-planned targets are skipped.
               </p>
 
               <div className="flex items-center gap-3 mb-4">
@@ -375,45 +446,24 @@ export default function BatchSetup() {
               </div>
 
               <div className="bg-gray-900 border border-gray-800 rounded-lg divide-y divide-gray-800 mb-6 max-h-[440px] overflow-y-auto">
-                {filtered.map((piece: any) => {
-                  const isSelected = selected.has(piece.name);
-                  const actionCount = typeof piece.actions === 'number' ? piece.actions : Object.keys(piece.actions || {}).length;
-                  const existingPlanCount = allPlans?.filter((p: any) => p.piece_name === piece.name).length || 0;
-                  const newActions = Math.max(0, actionCount - existingPlanCount);
-
-                  return (
-                    <label
-                      key={piece.name}
-                      className={`flex items-center gap-4 px-4 py-3 cursor-pointer hover:bg-gray-800/50 transition-colors ${isSelected ? 'bg-primary-600/10' : ''}`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => togglePiece(piece.name)}
-                        className="w-4 h-4 rounded border-gray-600 text-primary-500 focus:ring-primary-500/30"
-                      />
-                      {piece.logoUrl ? (
-                        <img src={piece.logoUrl} alt="" className="w-8 h-8 rounded" />
-                      ) : (
-                        <div className="w-8 h-8 bg-gray-700 rounded flex items-center justify-center">
-                          <Puzzle size={14} className="text-gray-400" />
-                        </div>
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-sm">{piece.displayName}</div>
-                        <div className="text-xs text-gray-500">{actionCount} action{actionCount !== 1 ? 's' : ''}</div>
-                      </div>
-                      <div className="text-xs text-right shrink-0">
-                        {existingPlanCount > 0 && (
-                          <span className="text-green-400">{existingPlanCount} plans exist</span>
-                        )}
-                        {newActions > 0 && (
-                          <span className={`${existingPlanCount > 0 ? 'ml-2' : ''} text-gray-400`}>{newActions} new</span>
-                        )}
-                      </div>
-                    </label>
-                  );
-                })}
+                {filtered.map((piece: any) => (
+                  <SelectPieceRow
+                    key={piece.name}
+                    piece={piece}
+                    selected={selected.has(piece.name)}
+                    deselected={deselectedTargets[piece.name]}
+                    expanded={expandedSelect.has(piece.name)}
+                    existingPlanCount={allPlans?.filter((p: any) => p.piece_name === piece.name).length || 0}
+                    onToggleExpand={() => setExpandedSelect(prev => {
+                      const next = new Set(prev);
+                      if (next.has(piece.name)) next.delete(piece.name);
+                      else next.add(piece.name);
+                      return next;
+                    })}
+                    onTogglePiece={() => togglePiece(piece.name)}
+                    onToggleTarget={(key, allKeys) => toggleTarget(piece.name, key, allKeys)}
+                  />
+                ))}
               </div>
 
               {/* Collapsed schedule config — cadence is sent at Start */}
@@ -515,6 +565,103 @@ export default function BatchSetup() {
               <History size={16} /> View history
             </button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── One selectable piece row (Generate step) with expandable per-target checkboxes ───
+function SelectPieceRow({
+  piece, selected, deselected, expanded, existingPlanCount,
+  onToggleExpand, onTogglePiece, onToggleTarget,
+}: {
+  piece: any;
+  selected: boolean;
+  deselected: Set<string> | undefined;
+  expanded: boolean;
+  existingPlanCount: number;
+  onToggleExpand: () => void;
+  onTogglePiece: () => void;
+  onToggleTarget: (key: string, allKeys: string[]) => void;
+}) {
+  const { data: meta } = useQuery({ queryKey: ['piece', piece.name], queryFn: () => api.getPiece(piece.name), enabled: expanded });
+  const checkboxRef = useRef<HTMLInputElement>(null);
+
+  const targets = pieceTargetList(meta);
+  const allKeys = targets.map(t => t.key);
+  const deselectedCount = deselected?.size ?? 0;
+  const fullyChecked = selected && deselectedCount === 0;
+  const indeterminate = selected && deselectedCount > 0;
+
+  useEffect(() => {
+    if (checkboxRef.current) checkboxRef.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+
+  const actionCount = typeof piece.actions === 'number' ? piece.actions : Object.keys(piece.actions || {}).length;
+  const totalTargets = targets.length;
+  const includedCount = totalTargets - deselectedCount;
+  const newActions = Math.max(0, actionCount - existingPlanCount);
+
+  return (
+    <div className={selected ? 'bg-primary-600/10' : ''}>
+      <div className="flex items-center gap-3 px-4 py-3 hover:bg-gray-800/50 transition-colors">
+        <input
+          ref={checkboxRef}
+          type="checkbox"
+          checked={fullyChecked}
+          onChange={onTogglePiece}
+          className="w-4 h-4 rounded border-gray-600 text-primary-500 focus:ring-primary-500/30"
+        />
+        {piece.logoUrl ? (
+          <img src={piece.logoUrl} alt="" className="w-8 h-8 rounded" />
+        ) : (
+          <div className="w-8 h-8 bg-gray-700 rounded flex items-center justify-center">
+            <Puzzle size={14} className="text-gray-400" />
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm">{piece.displayName}</div>
+          <div className="text-xs text-gray-500">
+            {meta ? `${includedCount} of ${totalTargets} selected` : `${actionCount} action${actionCount !== 1 ? 's' : ''}`}
+          </div>
+        </div>
+        <div className="text-xs text-right shrink-0">
+          {existingPlanCount > 0 && <span className="text-green-400">{existingPlanCount} plans exist</span>}
+          {newActions > 0 && <span className={`${existingPlanCount > 0 ? 'ml-2' : ''} text-gray-400`}>{newActions} new</span>}
+        </div>
+        <button
+          onClick={onToggleExpand}
+          className="p-1 text-gray-500 hover:text-gray-300 rounded"
+          title={expanded ? 'Collapse targets' : 'Select individual targets'}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-gray-800 bg-gray-950/50 px-4 py-2">
+          {!meta ? (
+            <div className="text-xs text-gray-500 py-1 flex items-center gap-2"><Loader2 size={12} className="animate-spin" /> Loading targets…</div>
+          ) : targets.length === 0 ? (
+            <div className="text-xs text-gray-500 py-1">No actions or triggers.</div>
+          ) : (
+            targets.map(t => (
+              <label key={t.key} className="flex items-center gap-2.5 py-1 pl-7 cursor-pointer text-sm">
+                <input
+                  type="checkbox"
+                  checked={!(deselected?.has(t.key))}
+                  onChange={() => onToggleTarget(t.key, allKeys)}
+                  className="w-3.5 h-3.5 rounded border-gray-600 text-primary-500 focus:ring-primary-500/30"
+                />
+                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${t.type === 'trigger' ? 'text-purple-300 bg-purple-500/15' : 'text-sky-300 bg-sky-500/15'}`}>
+                  {t.type === 'trigger' ? <Zap size={10} /> : <Play size={10} />}
+                  {t.type}
+                </span>
+                <span className="truncate">{t.displayName}</span>
+              </label>
+            ))
+          )}
         </div>
       )}
     </div>

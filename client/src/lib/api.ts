@@ -931,6 +931,12 @@ export interface ScheduleConfigInput {
   customCron?: string;
 }
 
+/** A batch-setup selection. Omit `targets` to generate plans for all targets of the piece. */
+export interface BatchSelection {
+  pieceName: string;
+  targets?: { type: 'action' | 'trigger'; name: string }[];
+}
+
 export interface BatchStatus {
   id: string;
   status: 'running' | 'done' | 'cancelled';
@@ -1208,8 +1214,8 @@ export const api = {
     request<{ success: boolean; deleted: number }>('DELETE', `/test-plans/runs${before ? `?before=${encodeURIComponent(before)}` : ''}`),
 
   // Batch Setup
-  startBatchSetup: (pieceNames: string[], schedule?: ScheduleConfigInput) =>
-    request<{ id: string; setupRunId: number; totalItems: number; pendingItems: number; skippedItems: number }>('POST', '/batch-setup/start', { pieceNames, schedule }),
+  startBatchSetup: (selections: BatchSelection[], schedule?: ScheduleConfigInput) =>
+    request<{ id: string; setupRunId: number; totalItems: number; pendingItems: number; skippedItems: number }>('POST', '/batch-setup/start', { selections, schedule }),
   getBatchStatus: () => request<BatchStatus | null>('GET', '/batch-setup/status'),
   subscribeBatchSetup,
   cancelBatchSetup: () => request<{ success: boolean }>('POST', '/batch-setup/cancel'),

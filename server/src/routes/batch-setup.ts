@@ -8,6 +8,7 @@ import {
   getSetupRun, listSetupRuns, listSetupRunItems,
 } from '../db/queries.js';
 import { executePlan } from '../services/plan-executor.js';
+import { itemsForSelection } from '../services/batch-selection.js';
 import { extractAndStoreLessons } from '../services/lesson-extractor.js';
 import { createSchedulesForRun } from '../services/setup-scheduler.js';
 import type { Cadence } from '../services/schedule-planner.js';
@@ -247,12 +248,24 @@ async function runBatchInBackground(queue: BatchQueue) {
 }
 
 // ── Start batch setup ──
+type BatchTarget = { type: 'action' | 'trigger'; name: string };
+type BatchSelection = { pieceName: string; targets?: BatchTarget[] };
+
 router.post('/start', async (req, res) => {
-  const { pieceNames, schedule } = req.body as {
-    pieceNames: string[];
+  const { selections: rawSelections, pieceNames, schedule } = req.body as {
+    selections?: BatchSelection[];
+    pieceNames?: string[];
     schedule?: { enabled?: boolean; cadence?: Cadence; customCron?: string };
   };
-  if (!pieceNames || !Array.isArray(pieceNames) || pieceNames.length === 0) {
+
+  const selections: BatchSelection[] =
+    Array.isArray(rawSelections) && rawSelections.length > 0
+      ? rawSelections
+      : Array.isArray(pieceNames) && pieceNames.length > 0
+        ? pieceNames.map(pieceName => ({ pieceName }))
+        : [];
+
+  if (selections.length === 0) {
     return res.status(400).json({ error: 'pieceNames array is required' });
   }
 
@@ -265,37 +278,20 @@ router.post('/start', async (req, res) => {
     const client = createClient();
     const items: BatchQueueItem[] = [];
 
-    for (const pieceName of pieceNames) {
+    for (const selection of selections) {
+      const { pieceName } = selection;
       const piece = await client.getPieceMetadata(pieceName);
       const existingTargets = new Set(listTestPlans(pieceName).map(p => `${p.target_type}:${p.target_action}`));
 
-      for (const [actionName, actionMeta] of Object.entries(piece.actions || {})) {
-        items.push({
-          pieceName,
-          pieceDisplayName: piece.displayName,
-          actionName,
-          actionDisplayName: (actionMeta as any).displayName || actionName,
-          targetType: 'action',
-          status: existingTargets.has(`action:${actionName}`) ? 'skipped' : 'pending',
-        });
-      }
-      for (const [triggerName, triggerMeta] of Object.entries(piece.triggers || {})) {
-        items.push({
-          pieceName,
-          pieceDisplayName: piece.displayName,
-          actionName: triggerName,
-          actionDisplayName: (triggerMeta as any).displayName || triggerName,
-          targetType: 'trigger',
-          status: existingTargets.has(`trigger:${triggerName}`) ? 'skipped' : 'pending',
-        });
-      }
+      items.push(...itemsForSelection(piece, selection, existingTargets));
     }
 
+    const pieceNamesDistinct = [...new Set(selections.map(s => s.pieceName))];
     const cadence: Cadence = schedule?.enabled === false ? 'none' : (schedule?.cadence ?? 'monthly');
     const run = createSetupRun({
       cadence,
       cron_template: '',
-      config: JSON.stringify({ scheduleEnabled: schedule?.enabled !== false, customCron: schedule?.customCron ?? '', pieceNames }),
+      config: JSON.stringify({ scheduleEnabled: schedule?.enabled !== false, customCron: schedule?.customCron ?? '', pieceNames: pieceNamesDistinct }),
     });
     const savedItems = addSetupRunItems(run.id, items.map(i => ({
       piece_name: i.pieceName,
