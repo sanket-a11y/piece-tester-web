@@ -947,7 +947,7 @@ export interface BatchStreamCallbacks {
   onLog: (data: { index: number; pieceName: string; actionName: string; log: AgentLogEntry }) => void;
   onPlanCreated: (data: { index: number; pieceName: string; actionName: string; planId: number; steps: TestPlanStep[]; status: string }) => void;
   onPlanApproved: (data: { index: number; pieceName: string; actionName: string; planId: number }) => void;
-  onBatchDone: (data: { status: string }) => void;
+  onBatchDone: (data: { status: string; setupRunId?: number; schedulesCreated?: number }) => void;
   onError: (message: string) => void;
 }
 
