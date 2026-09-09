@@ -1,9 +1,11 @@
+import type { ParsedApError } from './ap-error.js';
+
 const clean = (n: string) => n.replace('@activepieces/piece-', '');
 
 export interface FailingTarget {
   action: string;
   category: string;
-  error: string | null;
+  error: ParsedApError | null;
   run_id: number;
   reproduction: string[];   // human-readable plan-step lines
 }
@@ -45,7 +47,21 @@ export function buildReportDraft(finding: ReportFinding): ReportDraft {
   for (const t of targets) {
     lines.push('');
     lines.push(`### \`${t.action}\` — ${t.category}`);
-    if (t.error) lines.push(`**Error:** ${t.error}`);
+    if (t.error) {
+      lines.push('');
+      lines.push(`**${t.error.message}**`);
+      const codeStatus = [
+        t.error.code ? `\`${t.error.code}\`` : null,
+        typeof t.error.status === 'number' ? `HTTP ${t.error.status}` : null,
+      ].filter(Boolean);
+      if (codeStatus.length) { lines.push(''); lines.push(codeStatus.join(' · ')); }
+      const isJson = /^[\s]*[[{]/.test(t.error.raw);
+      lines.push('');
+      lines.push('```' + (isJson ? 'json' : ''));
+      lines.push(t.error.raw);
+      lines.push('```');
+    }
+    lines.push('');
     lines.push(`**Run:** #${t.run_id}`);
     if (t.reproduction.length) {
       lines.push('**Reproduction (test plan):**');

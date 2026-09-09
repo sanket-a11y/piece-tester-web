@@ -4,7 +4,13 @@ import { buildReportDraft } from './report-draft.js';
 const base = {
   piece_name: '@activepieces/piece-streak',
   failing_targets: [
-    { action: 'create-box', category: 'piece_error', error: "Cannot read 'id'", run_id: 42, reproduction: ['Create box {name:"x"}', 'Expect 200'] },
+    {
+      action: 'create-box',
+      category: 'piece_error',
+      error: { message: "Cannot read 'id'", raw: "Cannot read 'id'" },
+      run_id: 42,
+      reproduction: ['Create box {name:"x"}', 'Expect 200'],
+    },
   ],
 };
 
@@ -34,11 +40,33 @@ describe('buildReportDraft', () => {
     expect(d.priority).toBe(3);
   });
 
-  it('includes error, run ref, and reproduction in the description', () => {
+  it('renders the clean headline, run ref, and reproduction', () => {
     const d = buildReportDraft(base);
-    expect(d.description).toContain("Cannot read 'id'");
+    expect(d.description).toContain("**Cannot read 'id'**");
     expect(d.description).toContain('#42');
     expect(d.description).toContain('1. Create box');
+  });
+
+  it('renders code + HTTP status line only when present', () => {
+    const withCode = buildReportDraft({ ...base, failing_targets: [{
+      ...base.failing_targets[0],
+      error: { message: 'Invalid Request', code: 'BAD_REQUEST', status: 400, raw: '{\n  "code": "BAD_REQUEST"\n}' },
+    }] });
+    expect(withCode.description).toContain('`BAD_REQUEST` · HTTP 400');
+    expect(withCode.description).toContain('```json');
+    // The plain-error base has no code/status → no code line.
+    expect(buildReportDraft(base).description).not.toContain('HTTP');
+  });
+
+  it('uses a plain code fence when the raw error is not JSON', () => {
+    const d = buildReportDraft(base);
+    expect(d.description).toContain('```\n');
+    expect(d.description).not.toContain('```json');
+  });
+
+  it('appends the piece version only when provided', () => {
+    expect(buildReportDraft({ ...base, version: '0.4.2' }).description).toContain('(v0.4.2)');
+    expect(buildReportDraft(base).description).not.toContain('(v');
   });
 
   it('renders upstream authors when provided', () => {
