@@ -5,6 +5,10 @@ import { api, type AgentLogEntry, type BatchStatus, type BatchQueueItemStatus, t
 import { ScheduleStep } from '../components/ScheduleStep';
 import { SetupRunHistory } from '../components/SetupRunHistory';
 import {
+  pieceCoverage, matchesFilter, filterCounts, gapSelection,
+  type CoverageFilter, type PieceCoverage,
+} from '../lib/batchCoverage';
+import {
   Play, Loader2, Search, CheckCircle, XCircle, SkipForward,
   ChevronDown, ChevronRight, StopCircle, Brain, Puzzle,
   Clock, AlertTriangle, ListChecks, RefreshCw, Plug, Calendar,
@@ -71,6 +75,7 @@ export default function BatchSetup() {
   const [pieceTargetKeys, setPieceTargetKeys] = useState<Record<string, string[]>>({});
   const [expandedSelect, setExpandedSelect] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
+  const [coverageFilter, setCoverageFilter] = useState<CoverageFilter>('needs');
 
   // Wizard state
   const [step, setStep] = useState<Step>('connections');
@@ -183,15 +188,25 @@ export default function BatchSetup() {
   }
 
   function togglePiece(pieceName: string) {
-    const isChecked = selected.has(pieceName) && (deselectedTargets[pieceName]?.size ?? 0) === 0;
+    const isOn = selected.has(pieceName);
     setSelected(prev => {
       const next = new Set(prev);
-      // Unchecked (fully off) or indeterminate → select all; fully checked → deselect all.
-      if (isChecked) next.delete(pieceName);
+      if (isOn) next.delete(pieceName);
       else next.add(pieceName);
       return next;
     });
-    clearDeselected(pieceName);
+    if (isOn) {
+      clearDeselected(pieceName);
+      return;
+    }
+    // Selecting → default to gaps only by deselecting already-planned targets.
+    const planned = coverageByName.get(pieceName)?.plannedKeys;
+    setDeselectedTargets(prev => {
+      const next = { ...prev };
+      if (planned && planned.size > 0) next[pieceName] = new Set(planned);
+      else delete next[pieceName];
+      return next;
+    });
   }
 
   /** Toggle a single target key ('action:<name>' / 'trigger:<name>') for a piece. */
@@ -219,9 +234,12 @@ export default function BatchSetup() {
   }
 
   function selectAll() {
-    const available = getConnectedPieces();
-    setSelected(new Set(available.map((p: any) => p.name)));
-    setDeselectedTargets({});
+    // Only the currently-visible (filtered) pieces, gaps only.
+    const { selected: names, deselected } = gapSelection(filtered, allPlans);
+    setSelected(new Set(names));
+    setDeselectedTargets(
+      Object.fromEntries(Object.entries(deselected).map(([k, v]) => [k, new Set(v)])),
+    );
   }
 
   function selectNone() {
@@ -309,9 +327,16 @@ export default function BatchSetup() {
   }, {});
 
   const connectedList = getConnectedPieces();
-  const filtered = connectedList.filter((p: any) =>
+  const coverageByName = new Map<string, PieceCoverage>(
+    connectedList.map((p: any) => [p.name, pieceCoverage(p, allPlans)]),
+  );
+  const searchFiltered = connectedList.filter((p: any) =>
     p.displayName.toLowerCase().includes(search.toLowerCase()) ||
     p.name.toLowerCase().includes(search.toLowerCase())
+  );
+  const chipCounts = filterCounts(searchFiltered.map((p: any) => coverageByName.get(p.name)!.state));
+  const filtered = searchFiltered.filter((p: any) =>
+    matchesFilter(coverageByName.get(p.name)!.state, coverageFilter),
   );
 
   // Stats
@@ -423,11 +448,11 @@ export default function BatchSetup() {
           {!batchStatus ? (
             <>
               <p className="text-gray-400 text-sm mb-4">
-                Select pieces to generate AI test plans for their actions and triggers. Expand a piece to pick
-                individual targets. Plans are created one at a time to avoid API limits. Already-planned targets are skipped.
+                Generate AI test plans for pieces that still have gaps. Filter to focus on what needs plans, expand a
+                piece to pick individual targets. Plans are created one at a time; already-planned targets are skipped.
               </p>
 
-              <div className="flex items-center gap-3 mb-4">
+              <div className="flex items-center gap-3 mb-3">
                 <div className="relative flex-1 max-w-md">
                   <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
                   <input
@@ -445,15 +470,43 @@ export default function BatchSetup() {
                 </button>
               </div>
 
+              <div className="flex items-center gap-1.5 mb-4">
+                {([
+                  { key: 'all', label: 'All', count: chipCounts.all },
+                  { key: 'needs', label: 'Needs plans', count: chipCounts.needs },
+                  { key: 'partial', label: 'Partial', count: chipCounts.partial },
+                  { key: 'done', label: 'Done', count: chipCounts.done },
+                ] as const).map(chip => {
+                  const active = coverageFilter === chip.key;
+                  return (
+                    <button
+                      key={chip.key}
+                      onClick={() => setCoverageFilter(chip.key)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${active ? 'bg-primary-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}`}
+                    >
+                      {chip.label} <span className={active ? 'text-primary-200' : 'text-gray-500'}>{chip.count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
               <div className="bg-gray-900 border border-gray-800 rounded-lg divide-y divide-gray-800 mb-6 max-h-[440px] overflow-y-auto">
-                {filtered.map((piece: any) => (
+                {filtered.length === 0 ? (
+                  <div className="px-4 py-10 text-center text-sm text-gray-500">
+                    {coverageFilter === 'needs'
+                      ? 'All connected pieces are fully set up 🎉 — switch to All to review.'
+                      : coverageFilter === 'partial'
+                      ? 'No pieces are partially set up.'
+                      : 'No pieces match.'}
+                  </div>
+                ) : filtered.map((piece: any) => (
                   <SelectPieceRow
                     key={piece.name}
                     piece={piece}
                     selected={selected.has(piece.name)}
                     deselected={deselectedTargets[piece.name]}
                     expanded={expandedSelect.has(piece.name)}
-                    existingPlanCount={allPlans?.filter((p: any) => p.piece_name === piece.name).length || 0}
+                    coverage={coverageByName.get(piece.name)!}
                     onToggleExpand={() => setExpandedSelect(prev => {
                       const next = new Set(prev);
                       if (next.has(piece.name)) next.delete(piece.name);
@@ -573,14 +626,14 @@ export default function BatchSetup() {
 
 // ─── One selectable piece row (Generate step) with expandable per-target checkboxes ───
 function SelectPieceRow({
-  piece, selected, deselected, expanded, existingPlanCount,
+  piece, selected, deselected, expanded, coverage,
   onToggleExpand, onTogglePiece, onToggleTarget,
 }: {
   piece: any;
   selected: boolean;
   deselected: Set<string> | undefined;
   expanded: boolean;
-  existingPlanCount: number;
+  coverage: PieceCoverage;
   onToggleExpand: () => void;
   onTogglePiece: () => void;
   onToggleTarget: (key: string, allKeys: string[]) => void;
@@ -598,10 +651,11 @@ function SelectPieceRow({
     if (checkboxRef.current) checkboxRef.current.indeterminate = indeterminate;
   }, [indeterminate]);
 
-  const actionCount = typeof piece.actions === 'number' ? piece.actions : Object.keys(piece.actions || {}).length;
-  const totalTargets = targets.length;
-  const includedCount = totalTargets - deselectedCount;
-  const newActions = Math.max(0, actionCount - existingPlanCount);
+  const metaTotal = targets.length;
+  const includedCount = metaTotal - deselectedCount;
+  const { plannedKeys, plannedCount, totalTargets, state } = coverage;
+  const pct = totalTargets > 0 ? Math.round((plannedCount / totalTargets) * 100) : 0;
+  const barColor = state === 'done' ? 'bg-green-500' : state === 'partial' ? 'bg-amber-500' : 'bg-gray-600';
 
   return (
     <div className={selected ? 'bg-primary-600/10' : ''}>
@@ -623,12 +677,16 @@ function SelectPieceRow({
         <div className="flex-1 min-w-0">
           <div className="font-medium text-sm">{piece.displayName}</div>
           <div className="text-xs text-gray-500">
-            {meta ? `${includedCount} of ${totalTargets} selected` : `${actionCount} action${actionCount !== 1 ? 's' : ''}`}
+            {meta
+              ? `${includedCount} of ${metaTotal} selected`
+              : state === 'done' ? 'Fully set up' : `${totalTargets - plannedCount} to plan`}
           </div>
         </div>
-        <div className="text-xs text-right shrink-0">
-          {existingPlanCount > 0 && <span className="text-green-400">{existingPlanCount} plans exist</span>}
-          {newActions > 0 && <span className={`${existingPlanCount > 0 ? 'ml-2' : ''} text-gray-400`}>{newActions} new</span>}
+        <div className="w-28 shrink-0">
+          <div className="text-[11px] text-right text-gray-400 mb-1">{plannedCount} of {totalTargets} planned</div>
+          <div className="w-full bg-gray-800 rounded-full h-1.5">
+            <div className={`h-1.5 rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+          </div>
         </div>
         <button
           onClick={onToggleExpand}
@@ -646,21 +704,27 @@ function SelectPieceRow({
           ) : targets.length === 0 ? (
             <div className="text-xs text-gray-500 py-1">No actions or triggers.</div>
           ) : (
-            targets.map(t => (
-              <label key={t.key} className="flex items-center gap-2.5 py-1 pl-7 cursor-pointer text-sm">
-                <input
-                  type="checkbox"
-                  checked={!(deselected?.has(t.key))}
-                  onChange={() => onToggleTarget(t.key, allKeys)}
-                  className="w-3.5 h-3.5 rounded border-gray-600 text-primary-500 focus:ring-primary-500/30"
-                />
-                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${t.type === 'trigger' ? 'text-purple-300 bg-purple-500/15' : 'text-sky-300 bg-sky-500/15'}`}>
-                  {t.type === 'trigger' ? <Zap size={10} /> : <Play size={10} />}
-                  {t.type}
-                </span>
-                <span className="truncate">{t.displayName}</span>
-              </label>
-            ))
+            targets.map(t => {
+              const isPlanned = plannedKeys.has(t.key);
+              return (
+                <label key={t.key} className={`flex items-center gap-2.5 py-1 pl-7 cursor-pointer text-sm ${isPlanned ? 'opacity-60' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={!(deselected?.has(t.key))}
+                    onChange={() => onToggleTarget(t.key, allKeys)}
+                    className="w-3.5 h-3.5 rounded border-gray-600 text-primary-500 focus:ring-primary-500/30"
+                  />
+                  <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${t.type === 'trigger' ? 'text-purple-300 bg-purple-500/15' : 'text-sky-300 bg-sky-500/15'}`}>
+                    {t.type === 'trigger' ? <Zap size={10} /> : <Play size={10} />}
+                    {t.type}
+                  </span>
+                  <span className="truncate">{t.displayName}</span>
+                  {isPlanned && (
+                    <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-green-400/80 bg-green-500/10 px-1.5 py-0.5 rounded">planned</span>
+                  )}
+                </label>
+              );
+            })
           )}
         </div>
       )}
