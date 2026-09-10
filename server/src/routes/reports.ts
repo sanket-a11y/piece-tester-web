@@ -21,6 +21,7 @@ import {
   updateResolvedIssueNote,
   getPlanRun,
   getTestPlan,
+  firstFailedStepError,
   getSettings,
   getOpenReportForPiece,
   listOpenReports,
@@ -30,6 +31,8 @@ import { startAnalysis } from '../services/report-analyzer.js';
 import { getPieceRegressions, getPerformanceSummary, getFailureBreakdown } from '../services/regression-service.js';
 import { buildReportDraft, type ReportFinding } from '../services/report-draft.js';
 import { sendReport, ReportTransportError } from '../services/report-transport.js';
+import { parseApError } from '../services/ap-error.js';
+import { createClient } from '../services/test-engine.js';
 
 const router = Router();
 
@@ -334,7 +337,7 @@ router.patch('/resolved-issues/:id/note', (req, res) => {
 // ── Report to Pieces team (Linear via the AP flow) ──
 
 /** Assemble a ReportFinding for a piece from its current health + test-plan steps. */
-function gatherFinding(pieceName: string): ReportFinding | null {
+async function gatherFinding(pieceName: string): Promise<ReportFinding | null> {
   const piece = getPieceHealth().find(p => p.piece_name === pieceName);
   if (!piece || piece.failing_actions.length === 0) return null;
   const failing_targets = piece.failing_actions.map(fa => {
@@ -343,17 +346,23 @@ function gatherFinding(pieceName: string): ReportFinding | null {
       const steps = JSON.parse(getTestPlan(fa.plan_id)?.steps || '[]');
       if (Array.isArray(steps)) reproduction = steps.map((s: any) => String(s.label || s.actionName || s.id || 'step'));
     } catch { /* ignore malformed steps */ }
-    return { action: fa.action, category: fa.category, error: fa.error, run_id: fa.run_id, reproduction };
+    // Prefer the full run's step_results (untruncated); fall back to the board preview.
+    const raw = firstFailedStepError(getPlanRun(fa.run_id)?.step_results || '') ?? fa.error;
+    const error = raw ? parseApError(raw) : null;
+    return { action: fa.action, category: fa.category, error, run_id: fa.run_id, reproduction };
   });
-  return { piece_name: pieceName, failing_targets };
+  // Best-effort current piece version; omit if the AP client is unconfigured/unreachable.
+  let version: string | null = null;
+  try { version = (await createClient().getPieceMetadata(pieceName)).version ?? null; } catch { /* omit */ }
+  return { piece_name: pieceName, failing_targets, version };
 }
 
 // Build a draft (no network) so the modal can render + let the user edit before filing.
-router.post('/report/preview', (req, res) => {
+router.post('/report/preview', async (req, res) => {
   try {
     const { piece_name } = req.body;
     if (!piece_name) { res.status(400).json({ error: 'piece_name is required' }); return; }
-    const finding = gatherFinding(piece_name);
+    const finding = await gatherFinding(piece_name);
     if (!finding) { res.status(404).json({ error: 'No failing actions for this piece' }); return; }
     const existing = getOpenReportForPiece(piece_name);
     res.json({
@@ -377,7 +386,7 @@ router.post('/report', async (req, res) => {
 
     const existing = getOpenReportForPiece(piece_name);
     // Prefer the live category; if the piece has since healed, keep what was recorded.
-    const category = gatherFinding(piece_name)?.failing_targets[0]?.category || existing?.error_category || 'piece_error';
+    const category = (await gatherFinding(piece_name))?.failing_targets[0]?.category || existing?.error_category || 'piece_error';
 
     const result = await sendReport(webhookUrl, {
       mode: existing ? 'comment' : 'create',

@@ -1,5 +1,6 @@
 import { getDb } from './schema.js';
 import { buildConnectionBacklinks, type ConnectionBacklinks } from '../services/connection-health.js';
+import { parseApError } from '../services/ap-error.js';
 
 // ── Settings ──
 
@@ -717,18 +718,22 @@ export interface PieceHealthRow {
   recent: string[]; // last ~12 run statuses, oldest→newest, for a sparkline
 }
 
-/** Pull the first failed step's message out of a run's step_results JSON, shortened. */
-function extractFirstStepError(stepResultsJson: string): string | null {
+/** Raw (untruncated, uncleaned) error string of the first failed/assert_failed step. */
+export function firstFailedStepError(stepResultsJson: string): string | null {
   try {
     const steps = JSON.parse(stepResultsJson);
     if (!Array.isArray(steps)) return null;
     const failed = steps.find((s: any) => s && (s.status === 'failed' || s.status === 'assert_failed') && s.error);
-    if (!failed) return null;
-    let msg = String(failed.error);
-    try { const o = JSON.parse(msg); if (o && typeof o.message === 'string') msg = o.message; } catch { /* not JSON */ }
-    msg = msg.split('\n')[0].trim();
-    return msg.length > 100 ? msg.slice(0, 100) + '…' : msg;
+    return failed ? String(failed.error) : null;
   } catch { return null; }
+}
+
+/** 100-char cleaned preview of the first failed step's error, for the Health board. */
+export function extractFirstStepError(stepResultsJson: string): string | null {
+  const raw = firstFailedStepError(stepResultsJson);
+  if (raw == null) return null;
+  const msg = parseApError(raw).message;
+  return msg.length > 100 ? msg.slice(0, 100) + '…' : msg;
 }
 
 /** First step's error message regardless of status — used for blocked runs (sole step is 'skipped'). */
