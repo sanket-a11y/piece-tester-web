@@ -23,6 +23,14 @@ export default function Settings() {
   const [linearWebhookInput, setLinearWebhookInput] = useState('');
   const [savingLinear, setSavingLinear] = useState(false);
   const [linearResult, setLinearResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [hasNotifyWebhook, setHasNotifyWebhook] = useState(false);
+  const [notifyWebhookMasked, setNotifyWebhookMasked] = useState('');
+  const [notifyWebhookInput, setNotifyWebhookInput] = useState('');
+  const [notifyEnabled, setNotifyEnabled] = useState(false);
+  const [stormThreshold, setStormThreshold] = useState(8);
+  const [retestCount, setRetestCount] = useState(2);
+  const [savingNotify, setSavingNotify] = useState(false);
+  const [notifyResult, setNotifyResult] = useState<{ success: boolean; message: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -71,6 +79,11 @@ export default function Settings() {
       setMcpTokenMasked(s.mcp_token_masked || '');
       setHasLinearWebhook(s.has_linear_webhook || false);
       setLinearWebhookMasked(s.linear_webhook_masked || '');
+      setHasNotifyWebhook(s.has_notify_webhook || false);
+      setNotifyWebhookMasked(s.notify_webhook_masked || '');
+      setNotifyEnabled(!!s.notify_enabled);
+      setStormThreshold(s.notify_storm_threshold ?? 8);
+      setRetestCount(s.notify_retest_count ?? 2);
       setMcpConnectedViaOAuth(s.mcp_connected_via_oauth || false);
       setLoading(false);
     });
@@ -144,6 +157,33 @@ export default function Settings() {
     } catch (e: any) {
       setLinearResult({ success: false, message: e?.message || 'Failed to remove.' });
     }
+  };
+
+  const handleSaveNotify = async () => {
+    setSavingNotify(true); setNotifyResult(null);
+    try {
+      const payload: any = { notify_enabled: notifyEnabled ? 1 : 0, notify_storm_threshold: stormThreshold, notify_retest_count: retestCount };
+      if (notifyWebhookInput.trim()) payload.notify_webhook_url = notifyWebhookInput.trim();
+      await api.updateSettings(payload);
+      const s = await api.getSettings();
+      setHasNotifyWebhook(s.has_notify_webhook || false);
+      setNotifyWebhookMasked(s.notify_webhook_masked || '');
+      setNotifyWebhookInput('');
+      setNotifyResult({ success: true, message: 'Discord alert settings saved.' });
+    } catch (e: any) { setNotifyResult({ success: false, message: e?.message || 'Failed to save.' }); }
+    finally { setSavingNotify(false); }
+  };
+
+  const handleRemoveNotify = async () => {
+    try { await api.removeNotifyWebhook(); setHasNotifyWebhook(false); setNotifyWebhookMasked(''); setNotifyEnabled(false);
+      setNotifyResult({ success: true, message: 'Discord webhook removed.' });
+    } catch (e: any) { setNotifyResult({ success: false, message: e?.message || 'Failed to remove.' }); }
+  };
+
+  const handleTestNotify = async () => {
+    setNotifyResult(null);
+    try { await api.testNotification(); setNotifyResult({ success: true, message: 'Test alert sent — check the channel.' }); }
+    catch (e: any) { setNotifyResult({ success: false, message: e?.message || 'Failed to send.' }); }
   };
 
   const handleTest = async () => {
@@ -621,6 +661,43 @@ export default function Settings() {
         </div>
         {linearResult && (
           <p className={`mt-2 text-[12px] ${linearResult.success ? 'text-green-400' : 'text-red-400'}`}>{linearResult.message}</p>
+        )}
+      </div>
+
+      {/* Discord alerts */}
+      <div className="mt-6 rounded-lg border border-gray-800 bg-gray-900 p-4">
+        <h3 className="mb-1 text-sm font-semibold text-gray-200">Discord alerts</h3>
+        <p className="mb-3 text-[12px] text-gray-500">
+          Paste a Discord channel <span className="text-gray-300">Incoming Webhook URL</span>. Confirmed piece bugs from scheduled sweeps post here and self-edit as they verify or recover.
+        </p>
+        {hasNotifyWebhook ? (
+          <div className="mb-2 flex items-center gap-2 text-[12px] text-gray-400">
+            <span className="rounded bg-gray-800 px-2 py-1 font-mono">{notifyWebhookMasked}</span>
+            <button type="button" onClick={handleRemoveNotify} className="text-red-400 hover:underline">Remove</button>
+          </div>
+        ) : (
+          <p className="mb-2 text-[12px] text-amber-400/80">Not configured — no alerts will be sent.</p>
+        )}
+        <div className="flex gap-2">
+          <input value={notifyWebhookInput} onChange={e => setNotifyWebhookInput(e.target.value)}
+            placeholder="https://discord.com/api/webhooks/…"
+            className="flex-1 rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-sm text-gray-200" />
+          <button onClick={handleSaveNotify} disabled={savingNotify}
+            className="rounded bg-primary-600 px-3 py-1.5 text-sm text-white hover:bg-primary-500 disabled:opacity-50">
+            {savingNotify ? 'Saving…' : 'Save'}
+          </button>
+          <button onClick={handleTestNotify} disabled={!hasNotifyWebhook}
+            className="rounded border border-gray-700 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-800 disabled:opacity-50">
+            Send test alert
+          </button>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-4 text-[12px] text-gray-400">
+          <label className="flex items-center gap-2"><input type="checkbox" checked={notifyEnabled} onChange={e => setNotifyEnabled(e.target.checked)} /> Enabled</label>
+          <label className="flex items-center gap-2">Storm threshold <input type="number" min={1} value={stormThreshold} onChange={e => setStormThreshold(Number(e.target.value))} className="w-16 rounded border border-gray-700 bg-gray-950 px-2 py-1" /></label>
+          <label className="flex items-center gap-2">Retests <input type="number" min={0} max={5} value={retestCount} onChange={e => setRetestCount(Number(e.target.value))} className="w-16 rounded border border-gray-700 bg-gray-950 px-2 py-1" /></label>
+        </div>
+        {notifyResult && (
+          <p className={`mt-2 text-[12px] ${notifyResult.success ? 'text-green-400' : 'text-red-400'}`}>{notifyResult.message}</p>
         )}
       </div>
 

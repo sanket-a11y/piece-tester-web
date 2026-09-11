@@ -5,6 +5,7 @@ import { ActivepiecesClient } from '../services/ap-client.js';
 import { maskedSettings } from './settings-view.js';
 import { encryptSecret, hasEncryptionKey } from '../services/crypto-vault.js';
 import { decodeJwtExp } from '../services/jwt-util.js';
+import { postDiscordMessage } from '../services/notifier.js';
 
 // ── MCP OAuth constants ──
 const MCP_OAUTH_AUTHORIZE_URL = 'https://mcp.activepieces.com/authorize';
@@ -81,6 +82,11 @@ router.put('/', (req, res) => {
     if (typeof b.api_key === 'string' && b.api_key.trim()) updates.api_key = b.api_key.trim();
     // Only overwrite the webhook when a non-empty value is supplied (same "keep stored" rule as api_key).
     if (typeof b.linear_report_webhook_url === 'string' && b.linear_report_webhook_url.trim()) updates.linear_report_webhook_url = b.linear_report_webhook_url.trim();
+    if (typeof b.notify_webhook_url === 'string' && b.notify_webhook_url.trim()) updates.notify_webhook_url = b.notify_webhook_url.trim();
+    if (b.notify_enabled === 0 || b.notify_enabled === 1) updates.notify_enabled = b.notify_enabled;
+    if (typeof b.notify_storm_threshold === 'number' && Number.isFinite(b.notify_storm_threshold)) updates.notify_storm_threshold = Math.max(1, Math.floor(b.notify_storm_threshold));
+    if (typeof b.notify_retest_count === 'number' && Number.isFinite(b.notify_retest_count)) updates.notify_retest_count = Math.max(0, Math.min(5, Math.floor(b.notify_retest_count)));
+    if (typeof b.notify_reauth_digest_time === 'string' && /^\d{2}:\d{2}$/.test(b.notify_reauth_digest_time)) updates.notify_reauth_digest_time = b.notify_reauth_digest_time;
     res.json(maskedSettings(updateSettings(updates)));
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -237,6 +243,26 @@ router.post('/remove-anthropic-key', (_req, res) => {
 router.post('/remove-linear-webhook', (_req, res) => {
   updateSettings({ linear_report_webhook_url: '' });
   res.json({ success: true });
+});
+
+/** Clear the Discord notification webhook and disable notifications */
+router.post('/remove-notify-webhook', (_req, res) => {
+  updateSettings({ notify_webhook_url: '', notify_enabled: 0 });
+  res.json({ success: true });
+});
+
+/** Send a test message to the configured Discord webhook */
+router.post('/test-notification', async (_req, res) => {
+  const s = getSettings();
+  if (!s.notify_webhook_url) return res.status(400).json({ success: false, error: 'No Discord webhook configured' });
+  try {
+    await postDiscordMessage(s.notify_webhook_url, {
+      embeds: [{ title: '✅ Piece Tester connected', color: 0x57F287, description: 'This channel will receive confirmed piece-bug alerts.' }],
+    });
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err?.message || 'Failed to reach Discord' });
+  }
 });
 
 /**

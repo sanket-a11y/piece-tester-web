@@ -26,6 +26,11 @@ export interface SettingsRow {
   ap_service_password: string; // AES-256-GCM ciphertext (v1:iv:tag:data), never plaintext
   jwt_expiry: string;          // ISO timestamp derived from the JWT exp claim
   jwt_auth_status: string;     // '' | 'ok' | 'needs_attention:<reason>'
+  notify_webhook_url: string;
+  notify_enabled: number;
+  notify_storm_threshold: number;
+  notify_retest_count: number;
+  notify_reauth_digest_time: string;
   updated_at: string;
 }
 
@@ -56,6 +61,11 @@ export function updateSettings(s: Partial<Omit<SettingsRow, 'id' | 'updated_at'>
       ap_service_password = ?,
       jwt_expiry = ?,
       jwt_auth_status = ?,
+      notify_webhook_url = ?,
+      notify_enabled = ?,
+      notify_storm_threshold = ?,
+      notify_retest_count = ?,
+      notify_reauth_digest_time = ?,
       updated_at = datetime('now')
     WHERE id = 1
   `, [
@@ -78,6 +88,11 @@ export function updateSettings(s: Partial<Omit<SettingsRow, 'id' | 'updated_at'>
     s.ap_service_password ?? current.ap_service_password,
     s.jwt_expiry ?? current.jwt_expiry,
     s.jwt_auth_status ?? current.jwt_auth_status,
+    s.notify_webhook_url ?? current.notify_webhook_url,
+    s.notify_enabled ?? current.notify_enabled,
+    s.notify_storm_threshold ?? current.notify_storm_threshold,
+    s.notify_retest_count ?? current.notify_retest_count,
+    s.notify_reauth_digest_time ?? current.notify_reauth_digest_time,
   ]);
   return getSettings();
 }
@@ -1968,4 +1983,78 @@ export function finalizeSetupRun(
     );
     return getSetupRun(id);
   });
+}
+
+// ── Alerts ──
+
+export interface AlertRow {
+  id: number;
+  piece_name: string;
+  target_action: string | null;
+  target_type: string | null;
+  error_signature: string;
+  error_category: string | null;
+  error_message: string | null;
+  status: string; // verifying | confirmed | acknowledged | recovered
+  discord_message_id: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  confirmed_at: string | null;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  recovered_at: string | null;
+  fail_count: number;
+  last_run_id: number | null;
+  last_wave_id: string | null;
+  schedule_id: number | null;
+}
+
+export function getAlert(id: number): AlertRow | undefined {
+  return getDb().get<AlertRow>('SELECT * FROM alerts WHERE id = ?', [id]);
+}
+
+export function getOpenAlert(piece_name: string, target_action: string | null): AlertRow | undefined {
+  return getDb().get<AlertRow>(
+    `SELECT * FROM alerts WHERE piece_name = ? AND ((target_action = ?) OR (target_action IS NULL AND ? IS NULL)) AND recovered_at IS NULL ORDER BY id DESC`,
+    [piece_name, target_action, target_action],
+  );
+}
+
+export function listOpenAlerts(): AlertRow[] {
+  return getDb().all<AlertRow>('SELECT * FROM alerts WHERE recovered_at IS NULL ORDER BY id DESC');
+}
+
+export function createAlert(p: {
+  piece_name: string; target_action?: string | null; target_type?: string | null;
+  error_signature: string; error_category: string | null; error_message: string | null;
+  last_run_id?: number | null; last_wave_id?: string | null; schedule_id?: number | null;
+}): AlertRow {
+  const res = getDb().run(
+    `INSERT INTO alerts (piece_name, target_action, target_type, error_signature, error_category, error_message, status, last_run_id, last_wave_id, schedule_id)
+     VALUES (?, ?, ?, ?, ?, ?, 'verifying', ?, ?, ?)`,
+    [p.piece_name, p.target_action ?? null, p.target_type ?? null, p.error_signature, p.error_category, p.error_message, p.last_run_id ?? null, p.last_wave_id ?? null, p.schedule_id ?? null],
+  );
+  return getAlert(res.lastId)!;
+}
+
+export function updateAlert(id: number, u: Partial<Pick<AlertRow,
+  'error_signature' | 'error_category' | 'error_message' | 'status' | 'discord_message_id' |
+  'last_seen_at' | 'confirmed_at' | 'acknowledged_at' | 'acknowledged_by' | 'recovered_at' |
+  'fail_count' | 'last_run_id' | 'last_wave_id' | 'schedule_id'>>): AlertRow | undefined {
+  const current = getAlert(id);
+  if (!current) return undefined;
+  const fields: string[] = []; const values: unknown[] = [];
+  for (const [k, v] of Object.entries(u)) { if (v !== undefined) { fields.push(`${k} = ?`); values.push(v); } }
+  if (fields.length === 0) return current;
+  values.push(id);
+  getDb().run(`UPDATE alerts SET ${fields.join(', ')} WHERE id = ?`, values);
+  return getAlert(id);
+}
+
+export function acknowledgeAlert(id: number, by: string): AlertRow | undefined {
+  return updateAlert(id, { status: 'acknowledged', acknowledged_by: by, acknowledged_at: new Date().toISOString() });
+}
+
+export function recoverAlert(id: number): AlertRow | undefined {
+  return updateAlert(id, { status: 'recovered', recovered_at: new Date().toISOString() });
 }

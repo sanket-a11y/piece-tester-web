@@ -19,6 +19,11 @@ const raw = {
   ap_service_password: 'enc:supersecretencryptedpassword',
   jwt_expiry: '2026-09-08T00:00:00.000Z',
   jwt_auth_status: 'ok',
+  notify_webhook_url: 'https://discord.com/api/webhooks/1/SECRETHOOK',
+  notify_enabled: 1,
+  notify_storm_threshold: 8,
+  notify_retest_count: 2,
+  notify_reauth_digest_time: '09:00',
 };
 
 describe('maskedSettings', () => {
@@ -59,6 +64,15 @@ describe('maskedSettings', () => {
     expect(out.has_linear_webhook).toBe(true);
     expect(JSON.stringify(out)).not.toContain('SECRETHOOK');
     expect(out.linear_report_webhook_url).toBeUndefined();
+  });
+  it('exposes the discord webhook as presence + mask, never raw', () => {
+    const out = maskedSettings(raw) as any;
+    expect(out.has_notify_webhook).toBe(true);
+    expect(JSON.stringify(out)).not.toContain('SECRETHOOK');
+    expect(out.notify_webhook_url).toBeUndefined();
+    expect(out.notify_enabled).toBe(1);
+    expect(out.notify_storm_threshold).toBe(8);
+    expect(out.notify_retest_count).toBe(2);
   });
   it('does not over-expose short secrets', () => {
     const out = maskedSettings({ ...raw, api_key: 'short', anthropic_api_key: 'alsoShortKey' }) as any;

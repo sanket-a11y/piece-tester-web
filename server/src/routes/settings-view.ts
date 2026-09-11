@@ -16,6 +16,11 @@ export interface SettingsForView {
   mcp_pkce_verifier: string;
   mcp_oauth_state: string;
   linear_report_webhook_url: string;
+  notify_webhook_url: string;
+  notify_enabled: number;
+  notify_storm_threshold: number;
+  notify_retest_count: number;
+  notify_reauth_digest_time: string;
   ap_service_email: string;
   ap_service_password: string;
   jwt_expiry: string;
@@ -59,6 +64,12 @@ export function maskedSettings(s: SettingsForView) {
     mcp_token_masked: s.mcp_token ? '...' + s.mcp_token.slice(-8) : '',
     has_linear_webhook: !!s.linear_report_webhook_url,
     linear_webhook_masked: maskLong(s.linear_report_webhook_url, 34, 40),
+    has_notify_webhook: !!s.notify_webhook_url,
+    notify_webhook_masked: maskLong(s.notify_webhook_url, 34, 40),
+    notify_enabled: s.notify_enabled,
+    notify_storm_threshold: s.notify_storm_threshold,
+    notify_retest_count: s.notify_retest_count,
+    notify_reauth_digest_time: s.notify_reauth_digest_time,
     auto_refresh_enabled: !!(s.ap_service_email && s.ap_service_password),
     service_email_masked: maskEmail(s.ap_service_email),
     jwt_expires_at: s.jwt_expiry || '',

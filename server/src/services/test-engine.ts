@@ -1,6 +1,7 @@
 import { ActivepiecesClient } from './ap-client.js';
 import { getSettings, listTestPlans, type ScheduleTarget, type WaveInfo } from '../db/queries.js';
 import { executePlan } from './plan-executor.js';
+import { newWaveState, processRunAlert, finalizeWaveAlerts, realAlertDeps } from './alert-engine.js';
 
 /**
  * Creates an AP client from current DB settings.
@@ -48,15 +49,25 @@ export async function runScheduledTests(targets?: ScheduleTarget[] | null, wave?
 
   if (validPlans.length > 0) {
     console.log(`[scheduler] Running ${validPlans.length} test plan(s)...`);
-    (async () => {
-      for (const plan of validPlans) {
-        try {
-          await executePlan(plan.id, () => {}, 'scheduled', undefined, wave);
-        } catch (err) {
-          console.error(`[scheduler] Plan #${plan.id} (${plan.target_action}) failed:`, err);
-        }
+    const ws = newWaveState();
+    const deps = realAlertDeps();
+    for (const plan of validPlans) {
+      let run;
+      try {
+        run = await executePlan(plan.id, () => {}, 'scheduled', undefined, wave);
+      } catch (err) {
+        console.error(`[scheduler] Plan #${plan.id} (${plan.target_action}) failed:`, err);
+        continue;
       }
-    })();
+      if (wave?.wave_id) {
+        try { await processRunAlert(run, plan, wave, ws, deps); }
+        catch (err) { console.error(`[alerts] processRunAlert failed for plan #${plan.id}:`, err); }
+      }
+    }
+    if (wave?.wave_id) {
+      try { await finalizeWaveAlerts(wave, ws, deps); }
+      catch (err) { console.error('[alerts] finalizeWaveAlerts failed:', err); }
+    }
   }
 
 }
