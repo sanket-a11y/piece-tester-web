@@ -1162,6 +1162,8 @@ export const api = {
     request<PieceReportRow>('POST', '/reports/report', payload),
   getReported: () => request<PieceReportRow[]>('GET', '/reports/reported'),
   removeLinearWebhook: () => request<{ success: boolean }>('POST', '/settings/remove-linear-webhook'),
+  removeNotifyWebhook: () => request<{ success: boolean }>('POST', '/settings/remove-notify-webhook'),
+  testNotification: () => request<{ success: boolean; error?: string }>('POST', '/settings/test-notification'),
   getReportPieceBreakdown: (dateFrom?: string, dateTo?: string) => {
     const p = new URLSearchParams();
     if (dateFrom) p.set('date_from', dateFrom);
