@@ -15,6 +15,7 @@ import reportsRoutes from './routes/reports.js';
 import batchSetupRoutes from './routes/batch-setup.js';
 import coverageRoutes from './routes/coverage.js';
 import authRoutes from './routes/auth.js';
+import alertsRoutes from './routes/alerts.js';
 import { requireAuth, assertAuthConfig } from './middleware/auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -46,10 +47,27 @@ app.use('/api/test-plans', testPlansRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/batch-setup', batchSetupRoutes);
 app.use('/api/coverage', coverageRoutes);
+app.use('/api/alerts', alertsRoutes);
 
 // ── Serve React client in production ──
 const clientDist = path.resolve(__dirname, '../../dist/client');
 app.use(express.static(clientDist));
+
+// ── Acknowledge alert landing page (public HTML; POST it fires is protected) ──
+app.get('/ack/:id', (req, res) => {
+  const id = Number(req.params.id);
+  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Acknowledge alert</title>
+<style>body{font-family:system-ui;background:#0b0f19;color:#e5e7eb;display:grid;place-items:center;height:100vh;margin:0}.card{max-width:420px;padding:24px;border:1px solid #1f2937;border-radius:12px;text-align:center}a{color:#818cf8}</style>
+</head><body><div class="card"><h2 id="s">Acknowledging…</h2><p id="m"></p><p><a href="/">Open Piece Tester →</a></p></div>
+<script>
+fetch('/api/alerts/${id}/acknowledge',{method:'POST',credentials:'same-origin'})
+ .then(r=>r.json().then(d=>({ok:r.ok,d})))
+ .then(({ok,d})=>{document.getElementById('s').textContent = ok ? '✔ Acknowledged' : 'Could not acknowledge';
+   document.getElementById('m').textContent = ok ? (d.alreadyResolved?'This alert was already resolved.':'Re-alerts are now silenced until it recovers or the error changes.') : (d.error||'You may need to sign in first.');})
+ .catch(()=>{document.getElementById('s').textContent='Could not acknowledge';document.getElementById('m').textContent='You may need to sign in first.';});
+</script></body></html>`);
+});
+
 app.get('*', (_req, res) => {
   res.sendFile(path.join(clientDist, 'index.html'));
 });
