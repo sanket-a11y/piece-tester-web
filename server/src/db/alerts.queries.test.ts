@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { getDb } from './schema.js';
-import { getSettings, updateSettings } from './queries.js';
+import { getSettings, updateSettings, createAlert, getOpenAlert, updateAlert, acknowledgeAlert, recoverAlert, listOpenAlerts } from './queries.js';
 
 describe('notify settings', () => {
   beforeEach(() => {
@@ -15,5 +15,32 @@ describe('notify settings', () => {
     expect(s.notify_storm_threshold).toBe(5);
     expect(s.notify_retest_count).toBe(3);
     expect(s.notify_reauth_digest_time).toBe('13:30');
+  });
+});
+
+describe('alert CRUD', () => {
+  beforeEach(() => getDb().exec('DELETE FROM alerts;'));
+
+  it('creates then finds the open alert for a target', () => {
+    const a = createAlert({ piece_name: '@ap/stripe', target_action: 'create_customer', error_signature: 'piece_error:x', error_category: 'piece_error', error_message: 'boom', last_run_id: 1, last_wave_id: 'w1', schedule_id: 2 });
+    expect(a.status).toBe('verifying');
+    const open = getOpenAlert('@ap/stripe', 'create_customer');
+    expect(open?.id).toBe(a.id);
+  });
+
+  it('recovered alerts are no longer "open"', () => {
+    const a = createAlert({ piece_name: '@ap/x', target_action: 'a', error_signature: 's', error_category: 'piece_error', error_message: 'e' });
+    recoverAlert(a.id);
+    expect(getOpenAlert('@ap/x', 'a')).toBeUndefined();
+    expect(listOpenAlerts()).toHaveLength(0);
+  });
+
+  it('acknowledge records who + when and keeps it open', () => {
+    const a = createAlert({ piece_name: '@ap/y', target_action: 'b', error_signature: 's', error_category: 'piece_error', error_message: 'e' });
+    updateAlert(a.id, { status: 'confirmed' });
+    const ack = acknowledgeAlert(a.id, 'web session');
+    expect(ack?.status).toBe('acknowledged');
+    expect(ack?.acknowledged_by).toBe('web session');
+    expect(getOpenAlert('@ap/y', 'b')?.status).toBe('acknowledged');
   });
 });
