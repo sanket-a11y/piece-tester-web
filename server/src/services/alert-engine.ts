@@ -9,6 +9,10 @@ export interface RunOutcome { outcome: 'passed' | 'failed'; category: string; er
 
 /** Parse a run's step_results into a single outcome + the piece-implicating category/error. */
 export function analyzeRun(run: { status: string; step_results?: string | null }): RunOutcome {
+  // A blocked run (broken connection or stale plan) is NOT a piece bug — its target was
+  // skipped, not exercised. 'blocked' is neither piece-implicating nor env-noise, so the
+  // caller skips it (no alert, no recovery). The Health tab already surfaces these.
+  if (run.status === 'blocked') return { outcome: 'failed', category: 'blocked', error: 'run blocked (connection or stale plan)' };
   let steps: any[] = [];
   try { const p = JSON.parse(run.step_results || '[]'); if (Array.isArray(p)) steps = p; } catch { /* ignore */ }
   const thrown = steps.find(s => s && s.status === 'failed');
@@ -94,7 +98,12 @@ export async function processRunAlert(
   // alert whose initial post failed is left message-less on purpose so a later wave
   // re-raises it rather than silently swallowing the bug.
   if (existing && existing.error_signature === sig && existing.discord_message_id) {
-    deps.updateAlert(existing.id, { fail_count: (existing.fail_count ?? 1) + 1, last_seen_at: new Date().toISOString(), last_run_id: run.id, last_wave_id: wave.wave_id ?? null, error_message: a.error });
+    const bumped = deps.updateAlert(existing.id, { fail_count: (existing.fail_count ?? 1) + 1, last_seen_at: new Date().toISOString(), last_run_id: run.id, last_wave_id: wave.wave_id ?? null, error_message: a.error });
+    // Relabel a still-open confirmed bug as chronic with its running fire count (silent edit, no new ping).
+    if (bumped && bumped.status === 'confirmed' && existing.discord_message_id) {
+      try { await deps.edit(s.notify_webhook_url, existing.discord_message_id, alertEmbed(bumped, { appBaseUrl: deps.appBaseUrl, failCount: bumped.fail_count })); }
+      catch (err) { console.error(`[alerts] chronic relabel edit failed for ${plan.piece_name}/${plan.target_action ?? ''}:`, err); }
+    }
     return; // dedup — already alerted for this exact failure
   }
 

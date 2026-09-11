@@ -30,6 +30,11 @@ describe('analyzeRun', () => {
     expect(r.outcome).toBe('failed');
     expect(r.category).toBe('unknown');
   });
+  it('treats a blocked run (connection/stale) as non-piece-implicating even if a step looks failed', () => {
+    const r = analyzeRun({ status: 'blocked', step_results: JSON.stringify([{ status: 'failed', error: 'connection broken', errorCategory: 'piece_error' }]) } as any);
+    expect(r.category).toBe('blocked');
+    expect(PIECE_IMPLICATING.has(r.category)).toBe(false);
+  });
 });
 
 describe('retestTarget', () => {
@@ -105,6 +110,22 @@ describe('processRunAlert', () => {
     const ws = newWaveState();
     await processRunAlert(schedRun('failed', [{ status: 'failed', error: 'x', errorCategory: 'piece_error' }]), stripePlan, wave, ws, deps);
     expect([...store.values()][0].status).toBe('confirmed');
+  });
+
+  it('does not alert on a blocked run (broken connection / stale plan)', async () => {
+    const { deps, posts } = makeDeps();
+    await processRunAlert({ id: 7, status: 'blocked', step_results: JSON.stringify([{ status: 'failed', error: 'x', errorCategory: 'piece_error' }]) } as any, stripePlan, wave, newWaveState(), deps);
+    expect(posts).toHaveLength(0);
+  });
+
+  it('relabels a chronic (repeated) confirmed bug with its fire count', async () => {
+    const { deps, edits, store } = makeDeps();
+    await processRunAlert(schedRun('failed', [{ status: 'failed', error: 'boom', errorCategory: 'piece_error' }]), stripePlan, wave, newWaveState(), deps);
+    const editsAfterFirst = edits.length;
+    await processRunAlert(schedRun('failed', [{ status: 'failed', error: 'boom', errorCategory: 'piece_error' }]), stripePlan, wave, newWaveState(), deps);
+    expect([...store.values()][0].fail_count).toBe(2);
+    expect(edits.length).toBeGreaterThan(editsAfterFirst);          // a chronic relabel edit happened
+    expect(edits[edits.length - 1].m.embeds[0].description).toContain('chronic');
   });
 
   it('suppresses env-noise (auth) — no post', async () => {

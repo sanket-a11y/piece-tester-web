@@ -49,7 +49,7 @@ export function errorSignature(category: string, error: string | null): string {
   return `${category}:${norm}`;
 }
 
-export function alertEmbed(a: AlertLike, opts: { appBaseUrl: string; reproduced?: number; recoveredNote?: string }): DiscordMessage {
+export function alertEmbed(a: AlertLike, opts: { appBaseUrl: string; reproduced?: number; recoveredNote?: string; failCount?: number }): DiscordMessage {
   const target = a.target_action ? `${a.piece_name} · ${a.target_action}` : a.piece_name;
   const ackLinks = [`[Acknowledge](${opts.appBaseUrl}/ack/${a.id})`, `[Open in Health](${opts.appBaseUrl}/?piece=${encodeURIComponent(a.piece_name)})`].join('   ');
   let title: string, color: number, lines: string[];
@@ -66,7 +66,11 @@ export function alertEmbed(a: AlertLike, opts: { appBaseUrl: string; reproduced?
     case 'confirmed':
     default:
       title = `🔴 Piece bug — ${target}`; color = COLORS.confirmed;
-      lines = [opts.reproduced ? `Confirmed · reproduced ${opts.reproduced}× · ${a.error_category}` : `Confirmed (unverified retest) · ${a.error_category}`, a.error_message || '', ackLinks];
+      // A chronic bug (failed on multiple sweeps) shows its fire count; a fresh one shows the retest reproduction.
+      const headline = opts.failCount && opts.failCount > 1
+        ? `Confirmed · chronic — failed ${opts.failCount} sweeps · ${a.error_category}`
+        : opts.reproduced ? `Confirmed · reproduced ${opts.reproduced}× · ${a.error_category}` : `Confirmed (unverified retest) · ${a.error_category}`;
+      lines = [headline, a.error_message || '', ackLinks];
   }
   return { embeds: [{ title, color, description: lines.filter(Boolean).join('\n') }] };
 }

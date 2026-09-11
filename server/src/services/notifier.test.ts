@@ -66,6 +66,11 @@ describe('alertEmbed', () => {
     expect(e.color).toBe(0x57F287);
     expect(e.description).toContain('flaky');
   });
+  it('confirmed embed shows a chronic fire count when failCount>1', () => {
+    const e = alertEmbed({ ...baseAlert, status: 'confirmed' }, { appBaseUrl: 'https://app.test', failCount: 5 }).embeds![0];
+    expect(e.description).toContain('chronic');
+    expect(e.description).toContain('5');
+  });
   it('acknowledged embed is blurple and names who acknowledged', () => {
     const e = alertEmbed({ ...baseAlert, status: 'acknowledged', acknowledged_by: 'web session' }, { appBaseUrl: 'https://app.test' }).embeds![0];
     expect(e.color).toBe(0x5865F2);
