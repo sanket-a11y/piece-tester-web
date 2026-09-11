@@ -111,6 +111,18 @@ function initTables(db: DatabaseAdapter): void {
     db.exec(`ALTER TABLE settings ADD COLUMN jwt_auth_status TEXT NOT NULL DEFAULT ''`);
   }
 
+  // Migration: Discord alert settings
+  for (const [col, ddl] of [
+    ['notify_webhook_url',       `ALTER TABLE settings ADD COLUMN notify_webhook_url TEXT NOT NULL DEFAULT ''`],
+    ['notify_enabled',           `ALTER TABLE settings ADD COLUMN notify_enabled INTEGER NOT NULL DEFAULT 0`],
+    ['notify_storm_threshold',   `ALTER TABLE settings ADD COLUMN notify_storm_threshold INTEGER NOT NULL DEFAULT 8`],
+    ['notify_retest_count',      `ALTER TABLE settings ADD COLUMN notify_retest_count INTEGER NOT NULL DEFAULT 2`],
+    ['notify_reauth_digest_time',`ALTER TABLE settings ADD COLUMN notify_reauth_digest_time TEXT NOT NULL DEFAULT '09:00'`],
+  ] as const) {
+    const c = db.pragma(`table_info(settings)`) as { name: string }[];
+    if (!c.some(x => x.name === col)) db.exec(ddl);
+  }
+
   // Migration: add ai_config_meta column to piece_connections if missing
   const connCols = db.pragma(`table_info(piece_connections)`) as { name: string }[];
   // (table may not exist yet — the CREATE TABLE below creates it; run migration only if table exists)
@@ -469,6 +481,30 @@ function initTables(db: DatabaseAdapter): void {
       cost_usd REAL NOT NULL DEFAULT 0,
       operation TEXT NOT NULL DEFAULT 'create',
       created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      piece_name TEXT NOT NULL,
+      target_action TEXT,
+      target_type TEXT,
+      error_signature TEXT NOT NULL DEFAULT '',
+      error_category TEXT,
+      error_message TEXT,
+      status TEXT NOT NULL DEFAULT 'verifying',
+      discord_message_id TEXT,
+      first_seen_at TEXT DEFAULT (datetime('now')),
+      last_seen_at TEXT DEFAULT (datetime('now')),
+      confirmed_at TEXT,
+      acknowledged_at TEXT,
+      acknowledged_by TEXT,
+      recovered_at TEXT,
+      fail_count INTEGER NOT NULL DEFAULT 1,
+      last_run_id INTEGER,
+      last_wave_id TEXT,
+      schedule_id INTEGER
     );
   `);
 }

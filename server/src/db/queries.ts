@@ -26,6 +26,11 @@ export interface SettingsRow {
   ap_service_password: string; // AES-256-GCM ciphertext (v1:iv:tag:data), never plaintext
   jwt_expiry: string;          // ISO timestamp derived from the JWT exp claim
   jwt_auth_status: string;     // '' | 'ok' | 'needs_attention:<reason>'
+  notify_webhook_url: string;
+  notify_enabled: number;
+  notify_storm_threshold: number;
+  notify_retest_count: number;
+  notify_reauth_digest_time: string;
   updated_at: string;
 }
 
@@ -56,6 +61,11 @@ export function updateSettings(s: Partial<Omit<SettingsRow, 'id' | 'updated_at'>
       ap_service_password = ?,
       jwt_expiry = ?,
       jwt_auth_status = ?,
+      notify_webhook_url = ?,
+      notify_enabled = ?,
+      notify_storm_threshold = ?,
+      notify_retest_count = ?,
+      notify_reauth_digest_time = ?,
       updated_at = datetime('now')
     WHERE id = 1
   `, [
@@ -78,6 +88,11 @@ export function updateSettings(s: Partial<Omit<SettingsRow, 'id' | 'updated_at'>
     s.ap_service_password ?? current.ap_service_password,
     s.jwt_expiry ?? current.jwt_expiry,
     s.jwt_auth_status ?? current.jwt_auth_status,
+    s.notify_webhook_url ?? current.notify_webhook_url,
+    s.notify_enabled ?? current.notify_enabled,
+    s.notify_storm_threshold ?? current.notify_storm_threshold,
+    s.notify_retest_count ?? current.notify_retest_count,
+    s.notify_reauth_digest_time ?? current.notify_reauth_digest_time,
   ]);
   return getSettings();
 }
