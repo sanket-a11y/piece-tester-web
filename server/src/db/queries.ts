@@ -799,6 +799,25 @@ function firstStepId(stepResultsJson: string | null): string | null {
 const CURRENT_STATUS_RUN =
   `(r2.trigger_type = 'scheduled' OR (r2.trigger_type = 'retest' AND r2.status IN ('completed', 'failed', 'blocked')))`;
 
+/**
+ * Newest `n` scheduled runs per plan, newest first: one index seek per plan, not a pass over
+ * all history. started_at sits after the step_results blob, so it is read only when asked for.
+ */
+function recentScheduledRuns(n: number, opts: { planIds?: number[]; withStartedAt?: boolean } = {}) {
+  const where = opts.planIds ? `WHERE p.id IN (${opts.planIds.map(() => '?').join(',')})` : '';
+  return getDb().all<{ plan_id: number; piece_name: string; id: number; status: string; started_at: string }>(`
+    SELECT p.id AS plan_id, p.piece_name, r.id, r.status${opts.withStartedAt ? ', r.started_at' : ''}
+    FROM test_plans p
+    JOIN test_plan_runs r ON r.id IN (
+      SELECT r2.id FROM test_plan_runs r2
+      WHERE r2.plan_id = p.id AND r2.trigger_type = 'scheduled'
+      ORDER BY r2.id DESC LIMIT ?
+    )
+    ${where}
+    ORDER BY p.id, r.id DESC
+  `, [n, ...(opts.planIds ?? [])]);
+}
+
 export function getPieceHealth(): PieceHealthRow[] {
   const db = getDb();
 
@@ -816,21 +835,15 @@ export function getPieceHealth(): PieceHealthRow[] {
     )
   `);
 
-  // Last ~12 scheduled runs per piece (any action) for the sparkline.
-  const spark = db.all<{ piece_name: string; status: string; rn: number }>(`
-    WITH ranked AS (
-      SELECT p.piece_name AS piece_name, r.status AS status,
-        ROW_NUMBER() OVER (PARTITION BY p.piece_name ORDER BY r.id DESC) AS rn
-      FROM test_plans p JOIN test_plan_runs r ON r.plan_id = p.id
-      WHERE r.trigger_type = 'scheduled'
-    )
-    SELECT piece_name, status, rn FROM ranked WHERE rn <= 12 ORDER BY piece_name, rn DESC
-  `);
-
+  // Last ~12 scheduled runs per piece (any action) for the sparkline, oldest→newest.
+  const byPieceRuns = new Map<string, { id: number; status: string }[]>();
+  for (const r of recentScheduledRuns(12)) {
+    if (!byPieceRuns.has(r.piece_name)) byPieceRuns.set(r.piece_name, []);
+    byPieceRuns.get(r.piece_name)!.push(r);
+  }
   const recentByPiece = new Map<string, string[]>();
-  for (const row of spark) {
-    if (!recentByPiece.has(row.piece_name)) recentByPiece.set(row.piece_name, []);
-    recentByPiece.get(row.piece_name)!.push(row.status);
+  for (const [piece, runs] of byPieceRuns) {
+    recentByPiece.set(piece, runs.sort((a, b) => b.id - a.id).slice(0, 12).reverse().map(r => r.status));
   }
 
   const connectionBlocked = new Set<string>(); // pieces whose block is a broken connection (not stale)
@@ -1038,17 +1051,8 @@ export function getAttentionItems(): AttentionItem[] {
   if (latest.length === 0) return [];
 
   // Recent statuses per plan (newest first) for fail-streak + flaky detection.
-  const recent = db.all<{ plan_id: number; status: string; started_at: string; rn: number }>(`
-    WITH ranked AS (
-      SELECT r.plan_id AS plan_id, r.status AS status, r.started_at AS started_at,
-        ROW_NUMBER() OVER (PARTITION BY r.plan_id ORDER BY r.id DESC) AS rn
-      FROM test_plan_runs r
-      WHERE r.trigger_type = 'scheduled'
-    )
-    SELECT plan_id, status, started_at, rn FROM ranked WHERE rn <= 10 ORDER BY plan_id, rn
-  `);
   const historyByPlan = new Map<number, { status: string; started_at: string }[]>();
-  for (const row of recent) {
+  for (const row of recentScheduledRuns(10, { planIds: latest.map(r => r.plan_id), withStartedAt: true })) {
     if (!historyByPlan.has(row.plan_id)) historyByPlan.set(row.plan_id, []);
     historyByPlan.get(row.plan_id)!.push({ status: row.status, started_at: row.started_at });
   }

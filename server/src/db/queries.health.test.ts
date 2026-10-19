@@ -127,3 +127,18 @@ describe('getPieceHealth — flaky', () => {
     expect(getPieceHealth().map(r => r.piece_name)).toEqual(['a-failing', 'd-blocked', 'c-flaky', 'b-clean']);
   });
 });
+
+describe('getPieceHealth — sparkline', () => {
+  beforeEach(() => getDb().exec('DELETE FROM test_plan_runs; DELETE FROM test_plans;'));
+
+  it('takes the newest 12 scheduled runs across all of a piece\'s actions, oldest first', () => {
+    const a = seedPlan('gmail', 'send_email');
+    const b = seedPlan('gmail', 'find_email');
+    for (let i = 0; i < 10; i++) seedScheduledRun(a, 'completed');
+    for (let i = 0; i < 5; i++) { seedScheduledRun(b, 'failed'); seedScheduledRun(a, 'completed'); }
+    getDb().run(`INSERT INTO test_plan_runs (plan_id, status, trigger_type, step_results) VALUES (?,?,?,?)`, [b, 'failed', 'manual', '[]']);
+
+    const recent = getPieceHealth().find(r => r.piece_name === 'gmail')!.recent;
+    expect(recent).toEqual(['completed', 'completed', ...Array(5).fill(['failed', 'completed']).flat()]);
+  });
+});
