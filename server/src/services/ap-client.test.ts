@@ -106,3 +106,27 @@ describe('ActivepiecesClient.listConnections pagination', () => {
     expect(all).toHaveLength(50);
   });
 });
+
+describe('ActivepiecesClient piece catalog cache', () => {
+  const jsonServer = () => startServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(req.url?.startsWith('/v1/pieces/') ? { name: 'slack', actions: {}, triggers: {} } : [{ name: 'slack' }]));
+  });
+
+  it('reuses the catalog and per-piece metadata across clients for the same instance', async () => {
+    const { baseUrl, count } = await jsonServer();
+    await new ActivepiecesClient(baseUrl, 'key', 'proj').listPieces();
+    await new ActivepiecesClient(baseUrl, 'key', 'proj').listPieces();
+    await new ActivepiecesClient(baseUrl, 'key', 'proj').getPieceMetadata('slack');
+    await new ActivepiecesClient(baseUrl, 'key', 'proj').getPieceMetadata('slack');
+    expect(count()).toBe(2);
+  });
+
+  it('does not share entries across credentials and bypasses the cache when fresh', async () => {
+    const { baseUrl, count } = await jsonServer();
+    await new ActivepiecesClient(baseUrl, 'key', 'proj').listPieces();
+    await new ActivepiecesClient(baseUrl, 'other-key', 'proj').listPieces();
+    await new ActivepiecesClient(baseUrl, 'key', 'proj').listPieces({ fresh: true });
+    expect(count()).toBe(3);
+  });
+});
