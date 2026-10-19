@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api, type AgentLogEntry, type BatchStatus, type BatchQueueItemStatus, type ScheduleConfigInput, type SetupRunItem, type SetupRunSummary, type WaveSummary, type BatchSelection } from '../lib/api';
 import { ScheduleStep } from '../components/ScheduleStep';
 import { SetupRunHistory } from '../components/SetupRunHistory';
 import {
-  pieceCoverage, matchesFilter, filterCounts, gapSelection,
+  pieceCoverage, plannedKeysByPiece, matchesFilter, filterCounts, gapSelection,
   type CoverageFilter, type PieceCoverage,
 } from '../lib/batchCoverage';
 import {
@@ -16,6 +16,9 @@ import {
 } from 'lucide-react';
 
 type ItemStatus = BatchQueueItemStatus['status'];
+
+const MAX_ITEM_LOGS = 1000;
+const LOG_FLUSH_MS = 250;
 type Step = 'connections' | 'generate' | 'done';
 
 const STEPS: { key: Step; label: string; icon: JSX.Element }[] = [
@@ -57,7 +60,7 @@ function pieceTargetList(meta: any): { type: 'action' | 'trigger'; name: string;
 export default function BatchSetup() {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const { data: pieces, isLoading: loadingPieces } = useQuery({ queryKey: ['pieces'], queryFn: api.listPieces });
+  const { data: pieces, isLoading: loadingPieces } = useQuery({ queryKey: ['pieces'], queryFn: api.listPieces, staleTime: 5 * 60_000 });
   const { data: connections } = useQuery({ queryKey: ['connections'], queryFn: api.listConnections });
   const { data: allPlans } = useQuery({ queryKey: ['testPlans'], queryFn: () => api.listTestPlans() });
   const { data: setupRuns, refetch: refetchRuns } = useQuery({ queryKey: ['setupRuns'], queryFn: api.getSetupRuns });
@@ -98,13 +101,39 @@ export default function BatchSetup() {
   const [error, setError] = useState<string | null>(null);
   const [skippedNotice, setSkippedNotice] = useState<string | null>(null);
   const subControllerRef = useRef<AbortController | null>(null);
+  const pendingLogsRef = useRef<Record<number, AgentLogEntry[]>>({});
+  const logFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Running batches for the dashboard — polled while on the landing view.
   const { data: activeBatches } = useQuery({
-    queryKey: ['activeBatches'], queryFn: api.listActiveBatches, refetchInterval: 3000,
+    queryKey: ['activeBatches'], queryFn: api.listActiveBatches, refetchInterval: wizardActive ? false : 3000,
   });
 
-  const connectedPieces = new Set(connections?.map((c: any) => c.piece_name) ?? []);
+  const flushLogs = useCallback(() => {
+    logFlushRef.current = null;
+    const pending = pendingLogsRef.current;
+    pendingLogsRef.current = {};
+    setBatchLogs(prev => {
+      const next = { ...prev };
+      for (const [index, entries] of Object.entries(pending)) {
+        const merged = [...(next[+index] || []), ...entries];
+        next[+index] = merged.length > MAX_ITEM_LOGS ? merged.slice(-MAX_ITEM_LOGS) : merged;
+      }
+      return next;
+    });
+  }, []);
+
+  const pushLog = useCallback((index: number, log: AgentLogEntry) => {
+    (pendingLogsRef.current[index] ||= []).push(log);
+    if (!logFlushRef.current) logFlushRef.current = setTimeout(flushLogs, LOG_FLUSH_MS);
+  }, [flushLogs]);
+
+  const resetLogs = useCallback(() => {
+    if (logFlushRef.current) clearTimeout(logFlushRef.current);
+    logFlushRef.current = null;
+    pendingLogsRef.current = {};
+    setBatchLogs({});
+  }, []);
 
   const subscribeToExistingBatch = useCallback((id: string) => {
     subControllerRef.current?.abort();
@@ -118,29 +147,12 @@ export default function BatchSetup() {
           return next;
         });
       },
-      onLog: (data) => {
-        setBatchLogs(prev => ({
-          ...prev,
-          [data.index]: [...(prev[data.index] || []), data.log],
-        }));
-      },
+      onLog: (data) => pushLog(data.index, data.log),
       onPlanCreated: (data) => {
-        setBatchLogs(prev => ({
-          ...prev,
-          [data.index]: [
-            ...(prev[data.index] || []),
-            { timestamp: Date.now(), type: 'done', message: `Plan created (${data.steps.length} steps)` },
-          ],
-        }));
+        pushLog(data.index, { timestamp: Date.now(), type: 'done', message: `Plan created (${data.steps.length} steps)` });
       },
       onPlanApproved: (data) => {
-        setBatchLogs(prev => ({
-          ...prev,
-          [data.index]: [
-            ...(prev[data.index] || []),
-            { timestamp: Date.now(), type: 'done', message: 'Auto-test passed, plan approved!' },
-          ],
-        }));
+        pushLog(data.index, { timestamp: Date.now(), type: 'done', message: 'Auto-test passed, plan approved!' });
       },
       onBatchDone: (data) => {
         setBatchStatus(prev => prev ? { ...prev, status: data.status as any, completedAt: Date.now() } : prev);
@@ -154,10 +166,13 @@ export default function BatchSetup() {
       onError: (msg) => setError(msg),
     });
     subControllerRef.current = controller;
-  }, [refetchRuns, qc]);
+  }, [refetchRuns, qc, pushLog]);
 
   useEffect(() => {
-    return () => { subControllerRef.current?.abort(); };
+    return () => {
+      subControllerRef.current?.abort();
+      if (logFlushRef.current) clearTimeout(logFlushRef.current);
+    };
   }, []);
 
   // Once the batch actually stops (cancelled/done), leave the "Cancelling…" state.
@@ -232,7 +247,7 @@ export default function BatchSetup() {
 
   function selectAll() {
     // Only the currently-visible (filtered) pieces, gaps only.
-    const { selected: names, deselected } = gapSelection(filtered, allPlans);
+    const { selected: names, deselected } = gapSelection(filtered, plannedIndex);
     setSelected(new Set(names));
     setDeselectedTargets(
       Object.fromEntries(Object.entries(deselected).map(([k, v]) => [k, new Set(v)])),
@@ -244,14 +259,10 @@ export default function BatchSetup() {
     setDeselectedTargets({});
   }
 
-  function getConnectedPieces() {
-    return (pieces || []).filter((p: any) => !p.auth || connectedPieces.has(p.name));
-  }
-
   async function openBatch(id: string) {
     setError(null);
     setSkippedNotice(null);
-    setBatchLogs({});
+    resetLogs();
     setSchedulesCreated(null);
     setSetupRunId(null);
     setActiveBatchId(id);
@@ -275,7 +286,7 @@ export default function BatchSetup() {
     setStarting(true);
     setError(null);
     setSkippedNotice(null);
-    setBatchLogs({});
+    resetLogs();
     setSchedulesCreated(null);
     setSetupRunId(null);
     try {
@@ -332,7 +343,7 @@ export default function BatchSetup() {
     setActiveBatchId(null);
     setBatchStatus(null);
     setBatchItems([]);
-    setBatchLogs({});
+    resetLogs();
     setSelected(new Set());
     setCancelling(false);
     setError(null);
@@ -348,7 +359,7 @@ export default function BatchSetup() {
     setActiveBatchId(null);
     setBatchStatus(null);
     setBatchItems([]);
-    setBatchLogs({});
+    resetLogs();
     setCancelling(false);
     setError(null);
     setSkippedNotice(null);
@@ -362,24 +373,34 @@ export default function BatchSetup() {
   const runningBatches = (activeBatches ?? []).filter((b: any) => b?.status === 'running');
 
   // Group items by piece for display
-  const groupedItems = batchItems.reduce<Record<string, (BatchQueueItemStatus & { index: number })[]>>((acc, item) => {
+  const groupedItems = useMemo(() => batchItems.reduce<Record<string, (BatchQueueItemStatus & { index: number })[]>>((acc, item) => {
     if (!acc[item.pieceName]) acc[item.pieceName] = [];
     acc[item.pieceName].push(item);
     return acc;
-  }, {});
+  }, {}), [batchItems]);
 
-  const connectedList = getConnectedPieces();
-  const noAuthCount = connectedList.filter((p: any) => !p.auth).length;
-  const coverageByName = new Map<string, PieceCoverage>(
-    connectedList.map((p: any) => [p.name, pieceCoverage(p, allPlans)]),
+  const connectedList = useMemo(() => {
+    const connectedPieces = new Set(connections?.map((c: any) => c.piece_name) ?? []);
+    return (pieces || []).filter((p: any) => !p.auth || connectedPieces.has(p.name));
+  }, [pieces, connections]);
+  const noAuthCount = useMemo(() => connectedList.filter((p: any) => !p.auth).length, [connectedList]);
+  const plannedIndex = useMemo(() => plannedKeysByPiece(allPlans), [allPlans]);
+  const coverageByName = useMemo(() => new Map<string, PieceCoverage>(
+    connectedList.map((p: any) => [p.name, pieceCoverage(p, plannedIndex)]),
+  ), [connectedList, plannedIndex]);
+  const searchFiltered = useMemo(() => {
+    const q = search.toLowerCase();
+    return connectedList.filter((p: any) =>
+      p.displayName.toLowerCase().includes(q) || p.name.toLowerCase().includes(q),
+    );
+  }, [connectedList, search]);
+  const chipCounts = useMemo(
+    () => filterCounts(searchFiltered.map((p: any) => coverageByName.get(p.name)!.state)),
+    [searchFiltered, coverageByName],
   );
-  const searchFiltered = connectedList.filter((p: any) =>
-    p.displayName.toLowerCase().includes(search.toLowerCase()) ||
-    p.name.toLowerCase().includes(search.toLowerCase())
-  );
-  const chipCounts = filterCounts(searchFiltered.map((p: any) => coverageByName.get(p.name)!.state));
-  const filtered = searchFiltered.filter((p: any) =>
-    matchesFilter(coverageByName.get(p.name)!.state, coverageFilter),
+  const filtered = useMemo(
+    () => searchFiltered.filter((p: any) => matchesFilter(coverageByName.get(p.name)!.state, coverageFilter)),
+    [searchFiltered, coverageByName, coverageFilter],
   );
 
   // Stats
@@ -729,7 +750,7 @@ function SelectPieceRow({
   onTogglePiece: () => void;
   onToggleTarget: (key: string, allKeys: string[]) => void;
 }) {
-  const { data: meta } = useQuery({ queryKey: ['piece', piece.name], queryFn: () => api.getPiece(piece.name), enabled: expanded });
+  const { data: meta } = useQuery({ queryKey: ['piece', piece.name], queryFn: () => api.getPiece(piece.name), enabled: expanded, staleTime: 5 * 60_000 });
   const checkboxRef = useRef<HTMLInputElement>(null);
 
   const targets = pieceTargetList(meta);
