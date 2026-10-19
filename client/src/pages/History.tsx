@@ -1,6 +1,6 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { api, type PlanRunListItem, type StepResult } from '../lib/api';
 import { runDurationSeconds, formatDbTime, parseDbTime } from '../lib/time';
 import {
@@ -49,13 +49,20 @@ export default function History() {
 // ══════════════════════════════════════════════════════════════
 
 function PlanRunHistory({ pieceFilter }: { pieceFilter: string }) {
+  const [queryFilter, setQueryFilter] = useState(pieceFilter);
+  useEffect(() => {
+    const t = setTimeout(() => setQueryFilter(pieceFilter), 300);
+    return () => clearTimeout(t);
+  }, [pieceFilter]);
+
   const { data: runs, isLoading, refetch } = useQuery({
-    queryKey: ['plan-runs-all', pieceFilter],
+    queryKey: ['plan-runs-all', queryFilter],
     queryFn: () => api.listAllPlanRuns({
-      pieceName: pieceFilter || undefined,
+      pieceName: queryFilter || undefined,
       limit: 100,
     }),
     refetchInterval: 10_000,
+    placeholderData: keepPreviousData,
   });
 
   // schedule_id → label, so scheduled runs can name the schedule that fired them.
@@ -344,6 +351,10 @@ function RunSteps({ runId }: { runId: number }) {
 
 function StepResultRow({ sr, idx }: { sr: StepResult; idx: number }) {
   const [showOutput, setShowOutput] = useState(false);
+  const outputText = useMemo(
+    () => (!showOutput || sr.output == null ? '' : typeof sr.output === 'string' ? sr.output : JSON.stringify(sr.output, null, 2)),
+    [showOutput, sr.output],
+  );
 
   const stepIcon = sr.status === 'completed' ? <CheckCircle size={12} className="text-green-400" />
     : sr.status === 'failed' ? <XCircle size={12} className="text-red-400" />
@@ -383,7 +394,7 @@ function StepResultRow({ sr, idx }: { sr: StepResult; idx: number }) {
 
       {showOutput && sr.output != null && (
         <div className="ml-8 mt-1 text-[10px] text-green-400/60 bg-green-500/5 rounded p-1.5 font-mono max-h-32 overflow-y-auto whitespace-pre-wrap">
-          {typeof sr.output === 'string' ? sr.output : JSON.stringify(sr.output, null, 2)}
+          {outputText}
         </div>
       )}
 

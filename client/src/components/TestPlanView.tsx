@@ -58,6 +58,18 @@ const ERROR_CATEGORY_LABELS: Record<string, { label: string; cls: string }> = {
   unknown:     { label: 'Unknown',       cls: 'bg-gray-600/30 text-gray-300 border-gray-600/40' },
 };
 
+// Pretty JSON cached by object identity, so re-renders don't re-stringify large step payloads.
+const prettyCache = new WeakMap<object, string>();
+function prettyJson(v: unknown): string {
+  if (v === null || typeof v !== 'object') return String(JSON.stringify(v, null, 2));
+  let out = prettyCache.get(v);
+  if (out === undefined) {
+    out = String(JSON.stringify(v, null, 2));
+    prettyCache.set(v, out);
+  }
+  return out;
+}
+
 function fmtVal(v: unknown): string {
   if (v === undefined) return 'undefined';
   return typeof v === 'string' ? v : JSON.stringify(v);
@@ -955,7 +967,7 @@ export default function TestPlanView({
                             <textarea
                               className={`w-full mt-1 bg-gray-800 border rounded p-2 text-xs font-mono text-gray-300 resize-y ${inputErrors[step.id] ? 'border-red-500/60' : 'border-gray-700'}`}
                               rows={4}
-                              value={inputDrafts[step.id] ?? JSON.stringify(step.input, null, 2)}
+                              value={inputDrafts[step.id] ?? prettyJson(step.input)}
                               onChange={(e) => {
                                 const text = e.target.value;
                                 setInputDrafts(prev => ({ ...prev, [step.id]: text }));
@@ -972,7 +984,7 @@ export default function TestPlanView({
                           </>
                         ) : (
                           <pre className="mt-1 bg-gray-800/50 rounded p-2 overflow-x-auto text-gray-300 font-mono">
-                            {JSON.stringify(step.input, null, 2)}
+                            {prettyJson(step.input)}
                           </pre>
                         )}
                       </div>
@@ -1119,7 +1131,7 @@ export default function TestPlanView({
                         <pre className={`mt-1 bg-gray-800/50 rounded p-2 overflow-x-auto font-mono max-h-40 overflow-y-auto ${
                           sr.status === 'assert_failed' ? 'text-amber-200/80' : 'text-green-300/80'
                         }`}>
-                          {typeof sr.output === 'string' ? sr.output : String(JSON.stringify(sr.output, null, 2))}
+                          {typeof sr.output === 'string' ? sr.output : prettyJson(sr.output)}
                         </pre>
                       </div>
                     )}

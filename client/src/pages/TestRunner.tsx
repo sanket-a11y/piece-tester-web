@@ -12,6 +12,8 @@ import {
 
 interface RunMeta { piece: string; target: string; }
 
+const POLL_MS = 3000;
+
 export default function TestRunner() {
   const { data: coverage } = useQuery({ queryKey: ['coverage'], queryFn: api.getCoverage });
   const { data: plans } = useQuery({ queryKey: ['testPlans'], queryFn: () => api.listTestPlans() });
@@ -27,9 +29,13 @@ export default function TestRunner() {
   const [runs, setRuns] = useState<{ plan_id: number; run_id: number }[]>([]);
   const [runData, setRunData] = useState<Record<number, any>>({});
   const metaRef = useRef<Record<number, RunMeta>>({});
-  const pollRef = useRef<ReturnType<typeof setInterval>>();
+  const pollRef = useRef<ReturnType<typeof setTimeout>>();
+  const pollGenRef = useRef(0);
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  useEffect(() => () => {
+    pollGenRef.current++;
+    if (pollRef.current) clearTimeout(pollRef.current);
+  }, []);
 
   function runnablePlanIds(g: PieceGroup): number[] {
     return g.targets.filter((t) => t.runnable).map((t) => t.planId);
@@ -79,17 +85,25 @@ export default function TestRunner() {
     }
   }
 
+  // Polls only unfinished runs, and skips ticks while the tab is hidden.
   function startPolling(pairs: { plan_id: number; run_id: number }[]) {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
+    if (pollRef.current) clearTimeout(pollRef.current);
+    const gen = ++pollGenRef.current;
+    let pending = pairs;
+    const tick = async () => {
+      if (gen !== pollGenRef.current) return;
+      if (document.hidden) { pollRef.current = setTimeout(tick, POLL_MS); return; }
       const updates: Record<number, any> = {};
-      await Promise.all(pairs.map(async (p) => {
+      await Promise.all(pending.map(async (p) => {
         try { updates[p.run_id] = await api.getPlanRun(p.run_id); } catch { /* keep polling */ }
       }));
+      if (gen !== pollGenRef.current) return;
       setRunData((prev) => ({ ...prev, ...updates }));
-      const anyRunning = pairs.some((p) => (updates[p.run_id]?.status ?? 'running') === 'running');
-      if (!anyRunning) { clearInterval(pollRef.current); setRunning(false); }
-    }, 1500);
+      pending = pending.filter((p) => (updates[p.run_id]?.status ?? 'running') === 'running');
+      if (pending.length === 0) { setRunning(false); return; }
+      pollRef.current = setTimeout(tick, POLL_MS);
+    };
+    pollRef.current = setTimeout(tick, POLL_MS);
   }
 
   const totals = runs.reduce(

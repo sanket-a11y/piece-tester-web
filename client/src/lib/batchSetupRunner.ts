@@ -34,6 +34,8 @@ export interface BatchTarget {
 
 // Matches the server's 600s request timeout so a slow-but-healthy v2 run isn't flagged as an error.
 const TARGET_TIMEOUT_MS = 600_000;
+const MAX_LOGS_PER_ITEM = 500;
+const LOG_FLUSH_MS = 250;
 
 export const EMPTY_BATCH: BatchState = {
   pieceName: null,
@@ -52,18 +54,21 @@ export const EMPTY_BATCH: BatchState = {
 let states: Record<string, BatchState> = {};
 const controllers: Record<string, AbortController | null> = {};
 const listeners = new Set<() => void>();
+let pendingLogs: Record<string, Record<string, AgentLogEntry[]>> = {};
+let logFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 function emit() {
   for (const l of listeners) l();
 }
 
 function setState(pieceName: string, patch: Partial<BatchState>) {
+  if (patch.logs) delete pendingLogs[pieceName];
   const prev = states[pieceName] ?? EMPTY_BATCH;
   states = { ...states, [pieceName]: { ...prev, ...patch } };
   emit();
 }
 
-// ── useSyncExternalStore contract (whole map; consumers select their piece) ──
+// ── useSyncExternalStore contract; getFor is a stable per-piece snapshot (same object until that piece changes) ──
 export function subscribe(cb: () => void): () => void {
   listeners.add(cb);
   return () => { listeners.delete(cb); };
@@ -83,9 +88,28 @@ function updateItem(pieceName: string, key: string, status: BatchActionStatus) {
   setState(pieceName, { items: cur.items.map(it => (it.key === key ? { ...it, status } : it)) });
 }
 
+// Log lines arrive in bursts; batch them so each flush copies each array once and emits once.
+function flushLogs() {
+  logFlushTimer = null;
+  const pending = pendingLogs;
+  pendingLogs = {};
+  const next = { ...states };
+  for (const [pieceName, byKey] of Object.entries(pending)) {
+    const cur = next[pieceName] ?? EMPTY_BATCH;
+    const logs = { ...cur.logs };
+    for (const [key, entries] of Object.entries(byKey)) {
+      const merged = (logs[key] || []).concat(entries);
+      logs[key] = merged.length > MAX_LOGS_PER_ITEM ? merged.slice(-MAX_LOGS_PER_ITEM) : merged;
+    }
+    next[pieceName] = { ...cur, logs };
+  }
+  states = next;
+  emit();
+}
+
 function appendLog(pieceName: string, key: string, log: AgentLogEntry) {
-  const cur = states[pieceName] ?? EMPTY_BATCH;
-  setState(pieceName, { logs: { ...cur.logs, [key]: [...(cur.logs[key] || []), log] } });
+  ((pendingLogs[pieceName] ||= {})[key] ||= []).push(log);
+  if (!logFlushTimer) logFlushTimer = setTimeout(flushLogs, LOG_FLUSH_MS);
 }
 
 function setError(pieceName: string, key: string, msg: string) {

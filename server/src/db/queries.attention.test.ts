@@ -134,3 +134,24 @@ describe('getAttentionItems — out of credits', () => {
     expect(getAttentionItems().map(i => i.bucket)).toEqual(['watching', 'quota', 'noise']);
   });
 });
+
+describe('getAttentionItems — history window', () => {
+  beforeEach(() => getDb().exec('DELETE FROM test_plan_runs; DELETE FROM test_plans;'));
+
+  it('counts the streak over the newest 10 scheduled runs only', () => {
+    const plan = seedPlan('slack', 'send_message');
+    seedScheduledRun(plan, 'completed');
+    for (let i = 0; i < 12; i++) seedScheduledRun(plan, 'failed');
+    expect(getAttentionItems().find(i => i.piece_name === 'slack')!.fail_streak).toBe(10);
+  });
+
+  it('a pass just before the latest failure makes it flaky, not a streak', () => {
+    const plan = seedPlan('slack', 'send_message');
+    seedScheduledRun(plan, 'failed');
+    seedScheduledRun(plan, 'completed');
+    seedScheduledRun(plan, 'failed');
+    const item = getAttentionItems().find(i => i.piece_name === 'slack')!;
+    expect(item.fail_streak).toBe(1);
+    expect(item.flaky).toBe(true);
+  });
+});

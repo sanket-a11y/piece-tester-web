@@ -8,9 +8,14 @@ describe('run-history indexes', () => {
     ).map(r => r.name);
     expect(names).toEqual(expect.arrayContaining([
       'idx_test_plan_runs_plan_id',
-      'idx_test_plan_runs_wave_id',
+      'idx_test_plan_runs_wave_cover',
+      'idx_test_plan_runs_scheduled_cover',
+      'idx_test_plan_runs_plan_trigger',
       'idx_test_plan_runs_status',
       'idx_ai_usage_logs_created_at',
+      'idx_setup_runs_first_run_wave_id',
     ]));
+    expect(names).not.toContain('idx_test_plan_runs_wave_id');
+    expect(names).not.toContain('idx_test_plan_runs_trigger_started');
   });
 });

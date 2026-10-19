@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import {
-  getReportOverviewStats,
   getPieceBreakdown,
   getPieceHealth,
   getAttentionItems,
@@ -9,7 +8,6 @@ import {
   listQuarantine,
   addQuarantine,
   removeQuarantine,
-  getRunTrends,
   getRecentFailures,
   listReportAnalyses,
   getLatestCompletedAnalysis,
@@ -28,7 +26,7 @@ import {
   upsertPieceReport,
 } from '../db/queries.js';
 import { startAnalysis } from '../services/report-analyzer.js';
-import { getPieceRegressions, getPerformanceSummary, getFailureBreakdown } from '../services/regression-service.js';
+import { getReportOverview } from '../services/regression-service.js';
 import { buildReportDraft, type ReportFinding } from '../services/report-draft.js';
 import { sendReport, ReportTransportError } from '../services/report-transport.js';
 import { parseApError } from '../services/ap-error.js';
@@ -36,43 +34,12 @@ import { createClient } from '../services/test-engine.js';
 
 const router = Router();
 
-router.get('/regressions', (req, res) => {
+// Everything the Reports page draws, in one cached request.
+router.get('/overview', (req, res) => {
   try {
     const dateFrom = req.query.date_from as string | undefined;
     const dateTo = req.query.date_to as string | undefined;
-    res.json(getPieceRegressions(dateFrom, dateTo));
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Failure breakdown by category (auth / timeout / …) for the "why tests fail" chart.
-router.get('/failure-breakdown', (req, res) => {
-  try {
-    const dateFrom = req.query.date_from as string | undefined;
-    const dateTo = req.query.date_to as string | undefined;
-    res.json(getFailureBreakdown(dateFrom, dateTo));
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get('/summary', (req, res) => {
-  try {
-    const dateFrom = req.query.date_from as string | undefined;
-    const dateTo = req.query.date_to as string | undefined;
-    res.json(getPerformanceSummary(dateFrom, dateTo));
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get('/stats', (req, res) => {
-  try {
-    const dateFrom = req.query.date_from as string | undefined;
-    const dateTo = req.query.date_to as string | undefined;
-    const stats = getReportOverviewStats(dateFrom, dateTo);
-    res.json(stats);
+    res.json(getReportOverview(dateFrom, dateTo));
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -151,17 +118,6 @@ router.delete('/quarantine/:id', (req, res) => {
     const id = parseInt(req.params.id);
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return; }
     res.json({ success: removeQuarantine(id) });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get('/trends', (req, res) => {
-  try {
-    const dateFrom = req.query.date_from as string | undefined;
-    const dateTo = req.query.date_to as string | undefined;
-    const trends = getRunTrends(dateFrom, dateTo);
-    res.json(trends);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

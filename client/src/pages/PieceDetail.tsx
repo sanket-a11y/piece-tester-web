@@ -25,6 +25,7 @@ export default function PieceDetail() {
     queryKey: ['piece', name],
     queryFn: () => api.getPiece(name!),
     enabled: !!name,
+    staleTime: 5 * 60_000,
   });
   const { data: connections } = useQuery({ queryKey: ['connections'], queryFn: api.listConnections });
   // All connections for this piece (active + inactive)
@@ -68,8 +69,8 @@ export default function PieceDetail() {
 
   // ── Batch "Set up all with AI" — state lives in a module-level store, keyed
   // per piece, so each piece keeps its own run/logs/progress across navigation. ──
-  const allBatches = useSyncExternalStore(batchSetupRunner.subscribe, batchSetupRunner.getSnapshot);
-  const batch = (name && allBatches[name]) || EMPTY_BATCH;
+  const getBatch = useCallback(() => (name ? batchSetupRunner.getFor(name) : EMPTY_BATCH), [name]);
+  const batch = useSyncExternalStore(batchSetupRunner.subscribe, getBatch);
   const setupAllRunning = batch.running;
   const setupMode = batch.mode;
   const setupAllProgress = batch.progress;
@@ -1513,6 +1514,8 @@ export default function PieceDetail() {
 // Batch Setup Panel
 // ══════════════════════════════════════════════════════════════
 
+const MAX_RENDERED_LOGS = 200;
+
 const BATCH_STATUS_CONFIG: Record<BatchActionStatus, { icon: JSX.Element; label: string; color: string }> = {
   pending:        { icon: <Clock size={12} className="text-gray-500" />,              label: 'Pending',        color: 'text-gray-500' },
   running:        { icon: <Loader2 size={12} className="text-purple-400 animate-spin" />, label: 'Setting up...', color: 'text-purple-400' },
@@ -1541,12 +1544,14 @@ function BatchSetupPanel({
   const logPaneRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const currentLogs = expandedLog ? (logs[expandedLog] || []) : [];
+  const hiddenLogs = Math.max(0, currentLogs.length - MAX_RENDERED_LOGS);
+  const visibleLogs = hiddenLogs ? currentLogs.slice(hiddenLogs) : currentLogs;
   const expandedItem = expandedLog ? items.find(i => i.key === expandedLog) : undefined;
 
   useEffect(() => {
     const el = logPaneRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [currentLogs.length]);
+  }, [currentLogs]);
 
   useEffect(() => {
     stickToBottom.current = true;
@@ -1674,8 +1679,11 @@ function BatchSetupPanel({
                 )}
               </div>
               <div className="space-y-1">
-                {currentLogs.map((log, i) => (
-                  <div key={i} className={`text-[10px] font-mono leading-relaxed ${
+                {hiddenLogs > 0 && (
+                  <div className="text-[10px] text-gray-600 italic">{hiddenLogs} earlier lines hidden</div>
+                )}
+                {visibleLogs.map((log, i) => (
+                  <div key={hiddenLogs + i} className={`text-[10px] font-mono leading-relaxed ${
                     log.type === 'error' ? 'text-red-400' :
                     log.type === 'tool_call' ? 'text-cyan-400' :
                     log.type === 'tool_result' ? 'text-green-400/70' :

@@ -1336,33 +1336,12 @@ export const api = {
   deleteLesson: (pieceName: string, lessonId: number) => request<{ success: boolean }>('DELETE', `/pieces/${encodeURIComponent(pieceName)}/lessons/${lessonId}`),
 
   // Reports
-  getReportStats: (dateFrom?: string, dateTo?: string) => {
+  getReportOverview: (dateFrom?: string, dateTo?: string) => {
     const p = new URLSearchParams();
     if (dateFrom) p.set('date_from', dateFrom);
     if (dateTo) p.set('date_to', dateTo);
     const qs = p.toString();
-    return request<any>('GET', `/reports/stats${qs ? `?${qs}` : ''}`);
-  },
-  getReportRegressions: (dateFrom?: string, dateTo?: string) => {
-    const p = new URLSearchParams();
-    if (dateFrom) p.set('date_from', dateFrom);
-    if (dateTo) p.set('date_to', dateTo);
-    const qs = p.toString();
-    return request<any[]>('GET', `/reports/regressions${qs ? `?${qs}` : ''}`);
-  },
-  getFailureBreakdown: (dateFrom?: string, dateTo?: string) => {
-    const p = new URLSearchParams();
-    if (dateFrom) p.set('date_from', dateFrom);
-    if (dateTo) p.set('date_to', dateTo);
-    const qs = p.toString();
-    return request<any[]>('GET', `/reports/failure-breakdown${qs ? `?${qs}` : ''}`);
-  },
-  getPerformanceSummary: (dateFrom?: string, dateTo?: string) => {
-    const p = new URLSearchParams();
-    if (dateFrom) p.set('date_from', dateFrom);
-    if (dateTo) p.set('date_to', dateTo);
-    const qs = p.toString();
-    return request<any>('GET', `/reports/summary${qs ? `?${qs}` : ''}`);
+    return request<any>('GET', `/reports/overview${qs ? `?${qs}` : ''}`);
   },
   getPieceHealth: () => request<PieceHealthRow[]>('GET', '/reports/piece-health'),
   getAttention: () => request<AttentionItem[]>('GET', '/reports/attention'),
@@ -1396,13 +1375,6 @@ export const api = {
     if (dateTo) p.set('date_to', dateTo);
     const qs = p.toString();
     return request<any[]>('GET', `/reports/piece-breakdown${qs ? `?${qs}` : ''}`);
-  },
-  getReportTrends: (dateFrom?: string, dateTo?: string) => {
-    const p = new URLSearchParams();
-    if (dateFrom) p.set('date_from', dateFrom);
-    if (dateTo) p.set('date_to', dateTo);
-    const qs = p.toString();
-    return request<any[]>('GET', `/reports/trends${qs ? `?${qs}` : ''}`);
   },
   getReportFailures: (limit = 50, dateFrom?: string, dateTo?: string) => {
     const p = new URLSearchParams();

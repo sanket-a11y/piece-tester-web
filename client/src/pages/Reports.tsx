@@ -67,11 +67,8 @@ export default function Reports() {
   // which trigger a refetch + re-render → an infinite loop that never settles.
   const { dateFrom, dateTo } = useMemo(() => computeDateBounds(timeRange), [timeRange]);
 
-  const { data: summary, isLoading } = useQuery({ queryKey: ['report-summary', dateFrom, dateTo], queryFn: () => api.getPerformanceSummary(dateFrom, dateTo) });
-  const { data: stats } = useQuery({ queryKey: ['report-stats', dateFrom, dateTo], queryFn: () => api.getReportStats(dateFrom, dateTo) });
-  const { data: regressions = [] } = useQuery({ queryKey: ['report-regressions', dateFrom, dateTo], queryFn: () => api.getReportRegressions(dateFrom, dateTo) });
-  const { data: trends = [] } = useQuery({ queryKey: ['report-trends', dateFrom, dateTo], queryFn: () => api.getReportTrends(dateFrom, dateTo) });
-  const { data: breakdown = [] } = useQuery({ queryKey: ['report-failure-breakdown', dateFrom, dateTo], queryFn: () => api.getFailureBreakdown(dateFrom, dateTo) });
+  const { data: overview, isLoading } = useQuery({ queryKey: ['report-overview', dateFrom, dateTo], queryFn: () => api.getReportOverview(dateFrom, dateTo) });
+  const { summary, stats, regressions = [], trends = [], breakdown = [] } = overview ?? {};
   const { data: coverageRows } = useQuery({ queryKey: ['report-coverage'], queryFn: api.getCoverage, staleTime: 5 * 60 * 1000, retry: false });
   const coverage = coverageRows ? { covered: coverageRows.filter((r: any) => r.covered).length, total: coverageRows.length } : null;
 

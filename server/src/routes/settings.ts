@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { getSettings, updateSettings, getAiUsageSummary, getAiUsageBySession, getAiUsageByPiece, getAiUsageRecent } from '../db/queries.js';
 import { boundConcurrency } from '../services/concurrency.js';
 import { ActivepiecesClient } from '../services/ap-client.js';
+import { clearApCatalogCache } from '../services/ap-catalog-cache.js';
 import { maskedSettings } from './settings-view.js';
 import { encryptSecret, hasEncryptionKey } from '../services/crypto-vault.js';
 import { decodeJwtExp } from '../services/jwt-util.js';
@@ -119,6 +120,7 @@ router.put('/', (req, res) => {
     if (urlError) return res.status(400).json({ error: urlError });
     const saved = updateSettings(updates);
     if (updates.bug_trend_roster !== undefined) invalidateBugTrendCache();
+    if (updates.base_url !== undefined || updates.api_key !== undefined || updates.project_id !== undefined) clearApCatalogCache();
     res.json(maskedSettings(saved));
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -141,7 +143,7 @@ router.post('/test-connection', async (req, res) => {
 
   try {
     const client = new ActivepiecesClient(baseUrl, apiKey, projectId);
-    const pieces = await client.listPieces();
+    const pieces = await client.listPieces({ fresh: true });
     res.json({ success: true, pieceCount: pieces.length });
   } catch (err) {
     res.status(400).json({ success: false, error: ActivepiecesClient.formatError(err) });
@@ -186,7 +188,7 @@ router.post('/save-token', async (req, res) => {
   try {
     const client = new ActivepiecesClient(s.base_url, s.api_key, s.project_id, token.trim());
     // Verify it works by making a lightweight call
-    await client.listPieces();
+    await client.listPieces({ fresh: true });
     updateSettings({ jwt_token: token.trim() });
     res.json({ success: true, message: 'Token saved and verified successfully.' });
   } catch (err) {

@@ -22,6 +22,7 @@ import bugTrendRoutes from './routes/bug-trend.js';
 import vendorWatchRoutes from './routes/vendor-watch.js';
 import { requireAuth, assertAuthConfig, TRUST_PROXY } from './middleware/auth.js';
 import { rejectCrossSiteRequests } from './middleware/cross-site.js';
+import { compressResponses } from './middleware/compression.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT ?? '4000');
@@ -29,6 +30,7 @@ const HOST = process.env.HOST ?? '0.0.0.0';
 
 const app = express();
 app.set('trust proxy', TRUST_PROXY);
+app.use(compressResponses);
 app.use('/api', rejectCrossSiteRequests);
 app.use(express.json({ limit: '10mb' }));
 

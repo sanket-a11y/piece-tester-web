@@ -47,8 +47,24 @@ export function coverageState(plannedCount: number, totalTargets: number): Cover
   return 'partial';
 }
 
-export function pieceCoverage(piece: PieceSummaryLike, plans: TestPlan[] | undefined): PieceCoverage {
-  const plannedKeys = plannedKeysForPiece(plans, piece.name);
+/** Planned target keys for every piece in one pass over the plans. */
+export function plannedKeysByPiece(plans: TestPlan[] | undefined): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>();
+  for (const p of plans ?? []) {
+    let keys = index.get(p.piece_name);
+    if (!keys) index.set(p.piece_name, keys = new Set());
+    keys.add(targetKey(p.target_type, p.target_action));
+  }
+  return index;
+}
+
+export function pieceCoverage(
+  piece: PieceSummaryLike,
+  plans: TestPlan[] | Map<string, Set<string>> | undefined,
+): PieceCoverage {
+  const plannedKeys = plans instanceof Map
+    ? new Set(plans.get(piece.name))
+    : plannedKeysForPiece(plans, piece.name);
   const totalTargets = countTargets(piece.actions) + countTargets(piece.triggers);
   const plannedCount = totalTargets > 0 ? Math.min(plannedKeys.size, totalTargets) : 0;
   return { plannedKeys, plannedCount, totalTargets, state: coverageState(plannedCount, totalTargets) };
@@ -85,7 +101,7 @@ export function filterCounts(states: CoverageState[]): FilterCounts {
  */
 export function gapSelection(
   visible: PieceSummaryLike[],
-  plans: TestPlan[] | undefined,
+  plans: TestPlan[] | Map<string, Set<string>> | undefined,
 ): { selected: string[]; deselected: Record<string, string[]> } {
   const selected: string[] = [];
   const deselected: Record<string, string[]> = {};

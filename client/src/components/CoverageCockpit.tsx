@@ -1,4 +1,4 @@
-import { useState, useMemo, ReactNode } from 'react';
+import { useState, useMemo, useCallback, useDeferredValue, memo, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, CoverageRow, CadencePayload } from '../lib/api';
@@ -37,6 +37,7 @@ export default function CoverageCockpit() {
   });
 
   const [search, setSearch] = useState('');
+  const deferredSearch = useDeferredValue(search);
   const [filter, setFilter] = useState<Filter>('all');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -54,7 +55,7 @@ export default function CoverageCockpit() {
 
   // ── Filtered rows ──
   const visible = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return rows.filter(r => {
       if (q && !r.display_name.toLowerCase().includes(q) && !r.piece_name.toLowerCase().includes(q)) return false;
       switch (filter) {
@@ -67,10 +68,10 @@ export default function CoverageCockpit() {
         default:              return true;
       }
     });
-  }, [rows, search, filter]);
+  }, [rows, deferredSearch, filter]);
 
   // ── Mutations ──
-  async function run(fn: () => Promise<unknown>, ok: string) {
+  const run = useCallback(async (fn: () => Promise<unknown>, ok: string) => {
     setBusy(true); setNote(null);
     try {
       await fn();
@@ -84,15 +85,15 @@ export default function CoverageCockpit() {
     } finally {
       setBusy(false);
     }
-  }
+  }, [qc]);
 
-  const enroll = (pieces: string[], cadence: CadencePayload) =>
-    run(() => api.enrollPieces(pieces, cadence), `Enrolled ${pieces.length} piece(s).`);
+  const enroll = useCallback((pieces: string[], cadence: CadencePayload) =>
+    run(() => api.enrollPieces(pieces, cadence), `Enrolled ${pieces.length} piece(s).`), [run]);
   const changeCadence = (pieces: string[], cadence: CadencePayload) =>
     run(() => api.setPiecesCadence(pieces, cadence), `Updated cadence for ${pieces.length} piece(s).`);
   const unenroll = (pieces: string[]) =>
     run(() => api.unenrollPieces(pieces), `Removed ${pieces.length} piece(s).`);
-  async function genPlans(pieces: string[]) {
+  const genPlans = useCallback(async (pieces: string[]) => {
     setBusy(true); setNote(null);
     try {
       await api.startBatchSetup(pieces.map(pieceName => ({ pieceName })));
@@ -101,14 +102,24 @@ export default function CoverageCockpit() {
       setNote(e?.message ? `Error: ${e.message}` : 'Could not start plan generation.');
       setBusy(false);
     }
-  }
+  }, [navigate]);
 
-  // ── Selection helpers ──
-  const toggle = (name: string) => setSelected(prev => {
+  // ── Row callbacks (stable, so memoized rows skip re-render) ──
+  const toggleRow = useCallback((r: CoverageRow) => setSelected(prev => {
     const next = new Set(prev);
-    next.has(name) ? next.delete(name) : next.add(name);
+    next.has(r.piece_name) ? next.delete(r.piece_name) : next.add(r.piece_name);
     return next;
-  });
+  }), []);
+  const openPiece = useCallback((r: CoverageRow) => navigate(`/pieces/${encodeURIComponent(r.piece_name)}`), [navigate]);
+  const openRuns = useCallback((r: CoverageRow) => navigate(`/schedules?tab=logs&run=${r.last_run_id}`), [navigate]);
+  const enrollRow = useCallback((r: CoverageRow) => enroll([r.piece_name], DEFAULT_CADENCE), [enroll]);
+  const genPlansRow = useCallback((r: CoverageRow) => genPlans([r.piece_name]), [genPlans]);
+  const editRow = useCallback((r: CoverageRow) => setModal({
+    mode: 'cadence',
+    pieces: [r.piece_name],
+    initialConfig: validConfig(r.cadence?.config),
+    initialTimezone: r.cadence?.timezone,
+  }), []);
   const allVisibleSelected = visible.length > 0 && visible.every(r => selected.has(r.piece_name));
   const toggleAllVisible = () => setSelected(prev => {
     const next = new Set(prev);
@@ -258,18 +269,13 @@ export default function CoverageCockpit() {
                   key={r.piece_name}
                   r={r}
                   checked={selected.has(r.piece_name)}
-                  onToggle={() => toggle(r.piece_name)}
-                  onConnect={() => navigate(`/pieces/${encodeURIComponent(r.piece_name)}`)}
-                  onEnroll={() => enroll([r.piece_name], DEFAULT_CADENCE)}
-                  onGenPlans={() => genPlans([r.piece_name])}
-                  onOpenPlans={() => navigate(`/pieces/${encodeURIComponent(r.piece_name)}`)}
-                  onOpenRuns={() => navigate(`/schedules?tab=logs&run=${r.last_run_id}`)}
-                  onEdit={() => setModal({
-                    mode: 'cadence',
-                    pieces: [r.piece_name],
-                    initialConfig: validConfig(r.cadence?.config),
-                    initialTimezone: r.cadence?.timezone,
-                  })}
+                  onToggle={toggleRow}
+                  onConnect={openPiece}
+                  onEnroll={enrollRow}
+                  onGenPlans={genPlansRow}
+                  onOpenPlans={openPiece}
+                  onOpenRuns={openRuns}
+                  onEdit={editRow}
                   busy={busy}
                   generating={activeJobs[r.piece_name] ?? 0}
                 />
@@ -305,25 +311,27 @@ function validConfig(c: any): ScheduleConfig | undefined {
 
 // ── Row ──────────────────────────────────────────────────────────────────────
 
-function Row({
+type RowAction = (r: CoverageRow) => void;
+
+const Row = memo(function Row({
   r, checked, onToggle, onConnect, onEnroll, onGenPlans, onOpenPlans, onOpenRuns, onEdit, busy, generating,
 }: {
   r: CoverageRow;
   checked: boolean;
-  onToggle: () => void;
-  onConnect: () => void;
-  onEnroll: () => void;
-  onGenPlans: () => void;
-  onOpenPlans: () => void;
-  onOpenRuns: () => void;
-  onEdit: () => void;
+  onToggle: RowAction;
+  onConnect: RowAction;
+  onEnroll: RowAction;
+  onGenPlans: RowAction;
+  onOpenPlans: RowAction;
+  onOpenRuns: RowAction;
+  onEdit: RowAction;
   busy: boolean;
   generating: number;
 }) {
   return (
     <div className="grid grid-cols-[28px_1.25fr_0.85fr_0.95fr_0.7fr_0.8fr_92px] gap-2 px-3 py-2 border-b border-gray-800/60 last:border-b-0 items-center hover:bg-gray-800/30 text-sm">
       <div className="flex items-center">
-        <input type="checkbox" checked={checked} onChange={onToggle} className="accent-primary-500 cursor-pointer" />
+        <input type="checkbox" checked={checked} onChange={() => onToggle(r)} className="accent-primary-500 cursor-pointer" />
       </div>
 
       {/* Piece */}
@@ -332,7 +340,7 @@ function Row({
           {r.logo_url && <img src={r.logo_url} alt="" className="w-4 h-4 rounded-sm flex-shrink-0" />}
           {r.last_run_id ? (
             <button
-              onClick={onOpenRuns}
+              onClick={() => onOpenRuns(r)}
               title="Go to this piece's latest run"
               className="truncate font-medium text-left hover:text-primary-300 hover:underline"
             >
@@ -357,7 +365,7 @@ function Row({
       <div><ReadinessBadge r={r} /></div>
 
       {/* Plans (of actions + triggers) */}
-      <div><PlansCell r={r} onOpen={onOpenPlans} /></div>
+      <div><PlansCell r={r} onOpen={() => onOpenPlans(r)} /></div>
 
       {/* Cadence */}
       <div className="text-xs text-gray-400 truncate">
@@ -366,11 +374,15 @@ function Row({
 
       {/* Next action */}
       <div>
-        <NextButton r={r} busy={busy} onConnect={onConnect} onEnroll={onEnroll} onGenPlans={onGenPlans} onEdit={onEdit} />
+        <NextButton
+          r={r} busy={busy}
+          onConnect={() => onConnect(r)} onEnroll={() => onEnroll(r)}
+          onGenPlans={() => onGenPlans(r)} onEdit={() => onEdit(r)}
+        />
       </div>
     </div>
   );
-}
+});
 
 function CoverageBadge({ r }: { r: CoverageRow }) {
   if (!r.covered) return <Pill className="bg-gray-700/40 text-gray-400"><Circle size={9} /> Not covered</Pill>;

@@ -3,6 +3,7 @@ import type { TestPlan } from './api';
 import {
   targetKey,
   plannedKeysForPiece,
+  plannedKeysByPiece,
   coverageState,
   pieceCoverage,
   matchesFilter,
@@ -36,6 +37,30 @@ describe('plannedKeysForPiece', () => {
   it('is empty for an unknown piece and tolerates undefined plans', () => {
     expect(plannedKeysForPiece([], 'x').size).toBe(0);
     expect(plannedKeysForPiece(undefined, 'x').size).toBe(0);
+  });
+});
+
+describe('plannedKeysByPiece', () => {
+  it('indexes every piece in one pass, matching plannedKeysForPiece', () => {
+    const plans = [
+      plan('slack', 'send', 'action'),
+      plan('slack', 'new_message', 'trigger'),
+      plan('notion', 'create_page'),
+    ];
+    const index = plannedKeysByPiece(plans);
+    expect([...index.keys()].sort()).toEqual(['notion', 'slack']);
+    for (const name of ['slack', 'notion']) {
+      expect([...index.get(name)!].sort()).toEqual([...plannedKeysForPiece(plans, name)].sort());
+    }
+    expect(plannedKeysByPiece(undefined).size).toBe(0);
+  });
+
+  it('gives pieceCoverage the same result as the plan list', () => {
+    const plans = [plan('slack', 'send'), plan('slack', 'other')];
+    const piece = { name: 'slack', actions: 3, triggers: 0 };
+    const viaIndex = pieceCoverage(piece, plannedKeysByPiece(plans));
+    expect(viaIndex).toEqual(pieceCoverage(piece, plans));
+    expect(pieceCoverage({ name: 'none', actions: 1 }, plannedKeysByPiece(plans)).state).toBe('none');
   });
 });
 

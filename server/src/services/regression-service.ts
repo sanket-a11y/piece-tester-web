@@ -1,5 +1,5 @@
 import { getDb } from '../db/schema.js';
-import { getReportOverviewStats } from '../db/queries.js';
+import { getReportOverviewStats, getRunTrends, type ReportOverviewStats, type TrendDataPoint } from '../db/queries.js';
 import {
   classifyPiece,
   categorizeError,
@@ -29,21 +29,6 @@ interface RunRow {
 function percentile(sortedAsc: number[], p: number): number {
   if (!sortedAsc.length) return 0;
   return Math.round(sortedAsc[Math.min(sortedAsc.length - 1, Math.floor((p / 100) * sortedAsc.length))]);
-}
-
-function firstFailedError(stepResultsJson: string): string | null {
-  try {
-    const steps = JSON.parse(stepResultsJson);
-    if (Array.isArray(steps)) {
-      const failed = steps.find((s: any) => s.status === 'failed' && s.error);
-      if (failed) return String(failed.error);
-      const anyErr = steps.find((s: any) => s.error);
-      if (anyErr) return String(anyErr.error);
-    }
-  } catch {
-    /* ignore malformed step_results */
-  }
-  return null;
 }
 
 const LANE_ORDER: Record<Lane, number> = {
@@ -117,13 +102,22 @@ export function getFailureBreakdown(dateFrom?: string, dateTo?: string): { categ
   const params: unknown[] = [];
   if (dateFrom) { conds.push('r.started_at >= ?'); params.push(dateFrom); }
   if (dateTo) { conds.push('r.started_at <= ?'); params.push(dateTo); }
-  const rows = db.all<{ step_results: string }>(
-    `SELECT r.step_results AS step_results FROM test_plan_runs r WHERE ${conds.join(' AND ')}`,
+  // First failed step's error, else any step's error; picked in SQLite so the blobs never reach JS.
+  const rows = db.all<{ err: string | number | null }>(
+    `SELECT (
+       SELECT json_extract(j.value, '$.error')
+       FROM json_each(CASE WHEN json_valid(r.step_results) THEN
+              CASE WHEN json_type(r.step_results) = 'array' THEN r.step_results END END) j
+       WHERE json_extract(j.value, '$.error') IS NOT NULL AND json_extract(j.value, '$.error') NOT IN ('', 0)
+       ORDER BY json_extract(j.value, '$.status') = 'failed' DESC, j.key
+       LIMIT 1
+     ) AS err
+     FROM test_plan_runs r WHERE ${conds.join(' AND ')}`,
     params,
   );
   const counts = new Map<FailureCategory, number>();
   for (const r of rows) {
-    const cat = categorizeError(firstFailedError(r.step_results) || 'Unknown error');
+    const cat = categorizeError(r.err === null ? 'Unknown error' : String(r.err));
     counts.set(cat, (counts.get(cat) || 0) + 1);
   }
   return [...counts.entries()]
@@ -142,8 +136,12 @@ export interface PerformanceSummary {
   lane_counts: Record<Lane, number>;
 }
 
-export function getPerformanceSummary(dateFrom?: string, dateTo?: string): PerformanceSummary {
-  const stats = getReportOverviewStats(dateFrom, dateTo);
+export function getPerformanceSummary(
+  dateFrom?: string,
+  dateTo?: string,
+  stats: ReportOverviewStats = getReportOverviewStats(dateFrom, dateTo),
+  regs: RegressionRow[] = getPieceRegressions(dateFrom, dateTo),
+): PerformanceSummary {
 
   // Delta vs the previous equal-length period (only when a bounded range is given).
   let prevRate: number | null = null;
@@ -156,7 +154,6 @@ export function getPerformanceSummary(dateFrom?: string, dateTo?: string): Perfo
   }
   const delta = prevRate === null ? null : stats.success_rate - prevRate;
 
-  const regs = getPieceRegressions(dateFrom, dateTo);
   const laneCounts: Record<Lane, number> = {
     newly_broken: 0, degrading: 0, flaky: 0, recovered: 0, still_broken: 0, stable: 0, stale: 0,
   };
@@ -188,4 +185,41 @@ export function getPerformanceSummary(dateFrom?: string, dateTo?: string): Perfo
     p95_ms: pct(durs, 95),
     lane_counts: laneCounts,
   };
+}
+
+export interface ReportOverview {
+  summary: PerformanceSummary;
+  stats: ReportOverviewStats;
+  regressions: RegressionRow[];
+  trends: TrendDataPoint[];
+  breakdown: { category: FailureCategory; count: number }[];
+}
+
+const OVERVIEW_TTL_MS = 60_000;
+const overviewCache = new Map<string, { at: number; value: ReportOverview }>();
+
+export function clearReportOverviewCache(): void {
+  overviewCache.clear();
+}
+
+// Everything the Reports page draws, computed once per range and cached for a minute.
+// Keyed by minute so the client's "last N days" bounds, which drift by milliseconds, still hit.
+export function getReportOverview(dateFrom?: string, dateTo?: string): ReportOverview {
+  const key = `${dateFrom?.slice(0, 16) ?? ''}|${dateTo?.slice(0, 16) ?? ''}`;
+  const now = Date.now();
+  const hit = overviewCache.get(key);
+  if (hit && now - hit.at < OVERVIEW_TTL_MS) return hit.value;
+
+  const stats = getReportOverviewStats(dateFrom, dateTo);
+  const regressions = getPieceRegressions(dateFrom, dateTo);
+  const value: ReportOverview = {
+    summary: getPerformanceSummary(dateFrom, dateTo, stats, regressions),
+    stats,
+    regressions,
+    trends: getRunTrends(dateFrom, dateTo),
+    breakdown: getFailureBreakdown(dateFrom, dateTo),
+  };
+  for (const [k, v] of overviewCache) if (now - v.at >= OVERVIEW_TTL_MS) overviewCache.delete(k);
+  overviewCache.set(key, { at: now, value });
+  return value;
 }

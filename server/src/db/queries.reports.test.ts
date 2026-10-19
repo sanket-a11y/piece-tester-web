@@ -37,6 +37,26 @@ describe('getReportOverviewStats — blocked runs', () => {
   });
 });
 
+describe('test_plan_runs covering indexes', () => {
+  const planOf = (sql: string, params: unknown[] = []) =>
+    getDb().all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, params).map(r => r.detail).join(' ');
+
+  // started_at/completed_at sit after the step_results blob, so a non-covering read walks it.
+  it('answers date-ranged report reads from the index alone', () => {
+    expect(planOf(
+      `SELECT status, completed_at, plan_id FROM test_plan_runs WHERE trigger_type = 'scheduled' AND started_at >= ?`,
+      ['2026-01-01'],
+    )).toContain('COVERING INDEX idx_test_plan_runs_scheduled_cover');
+  });
+
+  it('answers the wave feed aggregate from the index alone', () => {
+    expect(planOf(
+      `SELECT wave_id, schedule_id, MIN(started_at), MAX(completed_at), COUNT(*), SUM(status = 'failed')
+       FROM test_plan_runs WHERE trigger_type = 'scheduled' AND wave_id IS NOT NULL GROUP BY wave_id`,
+    )).toMatch(/COVERING INDEX idx_test_plan_runs_(wave|scheduled)_cover/);
+  });
+});
+
 describe('getRunTrends — honors "all time"', () => {
   beforeEach(() => getDb().exec('DELETE FROM test_plan_runs; DELETE FROM test_plans;'));
 

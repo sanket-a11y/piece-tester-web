@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { getDb } from '../db/schema.js';
-import { getPieceRegressions, getPerformanceSummary, getFailureBreakdown } from './regression-service.js';
+import { getPieceRegressions, getPerformanceSummary, getFailureBreakdown, getReportOverview, clearReportOverviewCache } from './regression-service.js';
 
 function seedPlan(piece: string, action: string): number {
   return getDb().run(
@@ -138,5 +138,64 @@ describe('getFailureBreakdown', () => {
     const map = Object.fromEntries(bd.map(b => [b.category, b.count]));
     expect(map.auth).toBe(1);
     expect(map.timeout).toBeUndefined();
+  });
+
+  it('prefers the failed step error, falls back to any error, and tolerates bad step_results', () => {
+    const p = seedPlan('x', 'a');
+    seedRun(p, 'failed', '2026-08-20 10:00:00', JSON.stringify([
+      { stepId: 'a', status: 'completed', error: 'Request timed out' },
+      { stepId: 'b', status: 'failed', error: '' },
+      { stepId: 'c', status: 'failed', error: 'Request failed with status code 401' },
+    ]));
+    seedRun(p, 'failed', '2026-08-20 11:00:00', JSON.stringify([{ stepId: 'a', status: 'skipped', error: 'Request timed out' }]));
+    seedRun(p, 'failed', '2026-08-20 12:00:00', 'not json');
+    seedRun(p, 'failed', '2026-08-20 13:00:00', JSON.stringify({ error: 'status code 401' }));
+
+    const map = Object.fromEntries(getFailureBreakdown().map(b => [b.category, b.count]));
+    expect(map).toEqual({ auth: 1, timeout: 1, other: 2 });
+  });
+});
+
+describe('getReportOverview', () => {
+  beforeEach(() => {
+    getDb().exec('DELETE FROM test_plan_runs; DELETE FROM test_plans;');
+    clearReportOverviewCache();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('returns summary, stats, regressions, trends and breakdown in one payload', () => {
+    const p = seedPlan('alpha', 'x');
+    seedRun(p, 'completed', daysAgo(2));
+    seedRun(p, 'failed', daysAgo(1), AUTH_FAIL);
+
+    const o = getReportOverview();
+    expect(o.stats.passed_plan_runs).toBe(1);
+    expect(o.stats.failed_plan_runs).toBe(1);
+    expect(o.regressions.map(r => r.piece_name)).toEqual(['alpha']);
+    expect(o.summary.tested_pieces).toBe(1);
+    expect(o.summary.success_rate).toBe(50);
+    expect(o.trends).toHaveLength(2);
+    expect(o.breakdown).toEqual([{ category: 'auth', count: 1 }]);
+  });
+
+  it('serves repeat calls within the same minute from cache, then recomputes after 60 s', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-19T10:00:05Z'));
+    const p = seedPlan('alpha', 'x');
+    seedRun(p, 'completed', '2026-10-18 10:00:00');
+
+    const from = '2026-10-12T10:00:05.123Z';
+    const first = getReportOverview(from, '2026-10-19T10:00:05.123Z');
+    seedRun(p, 'completed', '2026-10-18 11:00:00');
+
+    // Same minute, different milliseconds — the "recent" bounds the client sends drift like this.
+    vi.setSystemTime(new Date('2026-10-19T10:00:40Z'));
+    const again = getReportOverview('2026-10-12T10:00:40.999Z', '2026-10-19T10:00:40.999Z');
+    expect(again).toBe(first);
+
+    vi.setSystemTime(new Date('2026-10-19T10:01:10Z'));
+    const fresh = getReportOverview(from, '2026-10-19T10:00:05.123Z');
+    expect(fresh).not.toBe(first);
+    expect(fresh.stats.passed_plan_runs).toBe(2);
   });
 });

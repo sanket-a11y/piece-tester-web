@@ -16,11 +16,19 @@ function capStrings(value: unknown): unknown {
   return value;
 }
 
+// Step outputs are replaced, never mutated, so the capped form can be reused across saves.
+const cappedOutputs = new WeakMap<object, unknown>();
+
 function capOutput(output: unknown): unknown {
+  const key = output !== null && typeof output === 'object' ? output : null;
+  if (key && cappedOutputs.has(key)) return cappedOutputs.get(key);
   const capped = capStrings(output);
   const json = JSON.stringify(capped);
-  if (json === undefined || json.length <= MAX_OUTPUT_BYTES) return capped;
-  return { truncated: true, bytes: json.length, preview: json.slice(0, MAX_OUTPUT_BYTES) };
+  const result = json === undefined || json.length <= MAX_OUTPUT_BYTES
+    ? capped
+    : { truncated: true, bytes: json.length, preview: json.slice(0, MAX_OUTPUT_BYTES) };
+  if (key) cappedOutputs.set(key, result);
+  return result;
 }
 
 /** The one path from in-memory step results to the stored JSON. Memory keeps the full values. */

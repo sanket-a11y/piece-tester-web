@@ -35,4 +35,13 @@ describe('serializeStepResults', () => {
     serializeStepResults(steps);
     expect((steps[0].output as any).image).toBe(long);
   });
+
+  it('reuses the capped form of an unchanged output and recomputes a replaced one', () => {
+    const rows = Array.from({ length: 200 }, (_, i) => ({ i, text: 'y'.repeat(1000) }));
+    const sr = step({ output: rows });
+    const first = serializeStepResults([sr]);
+    expect(serializeStepResults([sr])).toBe(first);
+    sr.output = { id: 2 };
+    expect(JSON.parse(serializeStepResults([sr]))[0].output).toEqual({ id: 2 });
+  });
 });

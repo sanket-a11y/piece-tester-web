@@ -1,4 +1,6 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
+import { createHash } from 'node:crypto';
+import { cachedFetch } from './ap-catalog-cache.js';
 
 // ── Types (shared with client via API responses) ──
 
@@ -118,12 +120,15 @@ export class ActivepiecesClient {
   private jwtToken: string | null;
   private maxRetries: number;
   private retryBackoffMs: number;
+  private cacheScope: string;
 
   constructor(baseUrl: string, apiKey: string, projectId: string, jwtToken?: string, retry: ApRetryOptions = {}) {
     this.projectId = projectId;
     this.jwtToken = jwtToken || null;
     this.maxRetries = retry.maxRetries ?? 3;
     this.retryBackoffMs = retry.retryBackoffMs ?? 500;
+    const keyHash = createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
+    this.cacheScope = `${baseUrl.replace(/\/+$/, '')}|${projectId}|${keyHash}`;
     this.http = axios.create({
       baseURL: baseUrl.replace(/\/+$/, ''),
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -174,15 +179,15 @@ export class ActivepiecesClient {
     return { token: resp.data.token ?? resp.data.body?.token ?? resp.data, projectId: resp.data.projectId };
   }
 
-  // Pieces
-  async listPieces(): Promise<PieceMetadataSummary[]> {
-    const { data } = await this.http.get<PieceMetadataSummary[]>('/v1/pieces', { params: { projectId: this.projectId } });
-    return data;
+  // Pieces — cached per AP instance + credentials; `fresh` bypasses the cache (credential checks).
+  async listPieces(opts: { fresh?: boolean } = {}): Promise<PieceMetadataSummary[]> {
+    const load = async () => (await this.http.get<PieceMetadataSummary[]>('/v1/pieces', { params: { projectId: this.projectId } })).data;
+    return opts.fresh ? load() : cachedFetch(`${this.cacheScope}|pieces`, load);
   }
 
   async getPieceMetadata(name: string): Promise<PieceMetadataFull> {
-    const { data } = await this.http.get<PieceMetadataFull>(`/v1/pieces/${encodeURIComponent(name)}`, { params: { projectId: this.projectId } });
-    return data;
+    return cachedFetch(`${this.cacheScope}|piece|${name}`, async () =>
+      (await this.http.get<PieceMetadataFull>(`/v1/pieces/${encodeURIComponent(name)}`, { params: { projectId: this.projectId } })).data);
   }
 
   // Connections
