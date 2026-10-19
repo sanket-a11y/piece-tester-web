@@ -661,6 +661,7 @@ function initTables(db: DatabaseAdapter): void {
     CREATE INDEX IF NOT EXISTS idx_test_plan_runs_wave_cover
       ON test_plan_runs(wave_id, trigger_type, schedule_id, status, started_at, completed_at);
     CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_created_at ON ai_usage_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_setup_runs_first_run_wave_id ON setup_runs(first_run_wave_id);
   `);
 
   // Vendor watch indexes (docs/superpowers/plans/2026-10-07-vendor-watch-bulk-safe.md)

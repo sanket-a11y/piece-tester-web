@@ -139,6 +139,21 @@ describe('getFailureBreakdown', () => {
     expect(map.auth).toBe(1);
     expect(map.timeout).toBeUndefined();
   });
+
+  it('prefers the failed step error, falls back to any error, and tolerates bad step_results', () => {
+    const p = seedPlan('x', 'a');
+    seedRun(p, 'failed', '2026-08-20 10:00:00', JSON.stringify([
+      { stepId: 'a', status: 'completed', error: 'Request timed out' },
+      { stepId: 'b', status: 'failed', error: '' },
+      { stepId: 'c', status: 'failed', error: 'Request failed with status code 401' },
+    ]));
+    seedRun(p, 'failed', '2026-08-20 11:00:00', JSON.stringify([{ stepId: 'a', status: 'skipped', error: 'Request timed out' }]));
+    seedRun(p, 'failed', '2026-08-20 12:00:00', 'not json');
+    seedRun(p, 'failed', '2026-08-20 13:00:00', JSON.stringify({ error: 'status code 401' }));
+
+    const map = Object.fromEntries(getFailureBreakdown().map(b => [b.category, b.count]));
+    expect(map).toEqual({ auth: 1, timeout: 1, other: 2 });
+  });
 });
 
 describe('getReportOverview', () => {
