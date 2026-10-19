@@ -1679,9 +1679,7 @@ export function updatePlanRun(id: number, updates: Partial<{
   step_results: string;
   paused_prompt: string | null;
   completed_at: string | null;
-}>): TestPlanRunRow | undefined {
-  const current = getPlanRun(id);
-  if (!current) return undefined;
+}>): void {
   const fields: string[] = [];
   const values: unknown[] = [];
   for (const [key, val] of Object.entries(updates)) {
@@ -1690,10 +1688,9 @@ export function updatePlanRun(id: number, updates: Partial<{
       values.push(val);
     }
   }
-  if (fields.length === 0) return current;
+  if (fields.length === 0) return;
   values.push(id);
   getDb().run(`UPDATE test_plan_runs SET ${fields.join(', ')} WHERE id = ?`, values);
-  return getPlanRun(id);
 }
 
 // ── Coverage cockpit ─────────────────────────────────────────────────────────
