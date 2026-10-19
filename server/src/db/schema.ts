@@ -653,6 +653,7 @@ function initTables(db: DatabaseAdapter): void {
     CREATE INDEX IF NOT EXISTS idx_test_plan_runs_plan_id ON test_plan_runs(plan_id);
     CREATE INDEX IF NOT EXISTS idx_test_plan_runs_wave_id ON test_plan_runs(wave_id);
     CREATE INDEX IF NOT EXISTS idx_test_plan_runs_status ON test_plan_runs(status);
+    CREATE INDEX IF NOT EXISTS idx_test_plan_runs_trigger_started ON test_plan_runs(trigger_type, started_at);
     CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_created_at ON ai_usage_logs(created_at);
   `);
 

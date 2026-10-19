@@ -1,5 +1,5 @@
 import { getDb } from '../db/schema.js';
-import { getReportOverviewStats } from '../db/queries.js';
+import { getReportOverviewStats, getRunTrends, type ReportOverviewStats, type TrendDataPoint } from '../db/queries.js';
 import {
   classifyPiece,
   categorizeError,
@@ -142,8 +142,12 @@ export interface PerformanceSummary {
   lane_counts: Record<Lane, number>;
 }
 
-export function getPerformanceSummary(dateFrom?: string, dateTo?: string): PerformanceSummary {
-  const stats = getReportOverviewStats(dateFrom, dateTo);
+export function getPerformanceSummary(
+  dateFrom?: string,
+  dateTo?: string,
+  stats: ReportOverviewStats = getReportOverviewStats(dateFrom, dateTo),
+  regs: RegressionRow[] = getPieceRegressions(dateFrom, dateTo),
+): PerformanceSummary {
 
   // Delta vs the previous equal-length period (only when a bounded range is given).
   let prevRate: number | null = null;
@@ -156,7 +160,6 @@ export function getPerformanceSummary(dateFrom?: string, dateTo?: string): Perfo
   }
   const delta = prevRate === null ? null : stats.success_rate - prevRate;
 
-  const regs = getPieceRegressions(dateFrom, dateTo);
   const laneCounts: Record<Lane, number> = {
     newly_broken: 0, degrading: 0, flaky: 0, recovered: 0, still_broken: 0, stable: 0, stale: 0,
   };
@@ -188,4 +191,41 @@ export function getPerformanceSummary(dateFrom?: string, dateTo?: string): Perfo
     p95_ms: pct(durs, 95),
     lane_counts: laneCounts,
   };
+}
+
+export interface ReportOverview {
+  summary: PerformanceSummary;
+  stats: ReportOverviewStats;
+  regressions: RegressionRow[];
+  trends: TrendDataPoint[];
+  breakdown: { category: FailureCategory; count: number }[];
+}
+
+const OVERVIEW_TTL_MS = 60_000;
+const overviewCache = new Map<string, { at: number; value: ReportOverview }>();
+
+export function clearReportOverviewCache(): void {
+  overviewCache.clear();
+}
+
+// Everything the Reports page draws, computed once per range and cached for a minute.
+// Keyed by minute so the client's "last N days" bounds, which drift by milliseconds, still hit.
+export function getReportOverview(dateFrom?: string, dateTo?: string): ReportOverview {
+  const key = `${dateFrom?.slice(0, 16) ?? ''}|${dateTo?.slice(0, 16) ?? ''}`;
+  const now = Date.now();
+  const hit = overviewCache.get(key);
+  if (hit && now - hit.at < OVERVIEW_TTL_MS) return hit.value;
+
+  const stats = getReportOverviewStats(dateFrom, dateTo);
+  const regressions = getPieceRegressions(dateFrom, dateTo);
+  const value: ReportOverview = {
+    summary: getPerformanceSummary(dateFrom, dateTo, stats, regressions),
+    stats,
+    regressions,
+    trends: getRunTrends(dateFrom, dateTo),
+    breakdown: getFailureBreakdown(dateFrom, dateTo),
+  };
+  for (const [k, v] of overviewCache) if (now - v.at >= OVERVIEW_TTL_MS) overviewCache.delete(k);
+  overviewCache.set(key, { at: now, value });
+  return value;
 }

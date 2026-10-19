@@ -37,6 +37,18 @@ describe('getReportOverviewStats — blocked runs', () => {
   });
 });
 
+describe('test_plan_runs report index', () => {
+  it('indexes (trigger_type, started_at) so report queries skip a full scan', () => {
+    const idx = getDb().all<{ name: string }>(`PRAGMA index_list(test_plan_runs)`).map(i => i.name);
+    expect(idx).toContain('idx_test_plan_runs_trigger_started');
+    const plan = getDb().all<{ detail: string }>(
+      `EXPLAIN QUERY PLAN SELECT COUNT(*) FROM test_plan_runs WHERE trigger_type = 'scheduled' AND started_at >= ?`,
+      ['2026-01-01'],
+    ).map(r => r.detail).join(' ');
+    expect(plan).toContain('idx_test_plan_runs_trigger_started');
+  });
+});
+
 describe('getRunTrends — honors "all time"', () => {
   beforeEach(() => getDb().exec('DELETE FROM test_plan_runs; DELETE FROM test_plans;'));
 
