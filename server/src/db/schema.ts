@@ -648,13 +648,18 @@ function initTables(db: DatabaseAdapter): void {
   `);
 
   // Run-history indexes (docs/superpowers/specs/2026-10-12-slow-board-queries-design.md).
-  // After every test_plan_runs column migration above.
+  // After every test_plan_runs column migration above. The two *_cover indexes hold every column
+  // the report/wave reads touch: those columns sit after the step_results blob in the row.
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_test_plan_runs_plan_id ON test_plan_runs(plan_id);
-    CREATE INDEX IF NOT EXISTS idx_test_plan_runs_wave_id ON test_plan_runs(wave_id);
     CREATE INDEX IF NOT EXISTS idx_test_plan_runs_status ON test_plan_runs(status);
-    CREATE INDEX IF NOT EXISTS idx_test_plan_runs_trigger_started ON test_plan_runs(trigger_type, started_at);
     CREATE INDEX IF NOT EXISTS idx_test_plan_runs_plan_trigger ON test_plan_runs(plan_id, trigger_type);
+    DROP INDEX IF EXISTS idx_test_plan_runs_wave_id;
+    DROP INDEX IF EXISTS idx_test_plan_runs_trigger_started;
+    CREATE INDEX IF NOT EXISTS idx_test_plan_runs_scheduled_cover
+      ON test_plan_runs(trigger_type, started_at, status, completed_at, plan_id, wave_id, schedule_id);
+    CREATE INDEX IF NOT EXISTS idx_test_plan_runs_wave_cover
+      ON test_plan_runs(wave_id, trigger_type, schedule_id, status, started_at, completed_at);
     CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_created_at ON ai_usage_logs(created_at);
   `);
 

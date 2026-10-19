@@ -37,15 +37,23 @@ describe('getReportOverviewStats — blocked runs', () => {
   });
 });
 
-describe('test_plan_runs report index', () => {
-  it('indexes (trigger_type, started_at) so report queries skip a full scan', () => {
-    const idx = getDb().all<{ name: string }>(`PRAGMA index_list(test_plan_runs)`).map(i => i.name);
-    expect(idx).toContain('idx_test_plan_runs_trigger_started');
-    const plan = getDb().all<{ detail: string }>(
-      `EXPLAIN QUERY PLAN SELECT COUNT(*) FROM test_plan_runs WHERE trigger_type = 'scheduled' AND started_at >= ?`,
+describe('test_plan_runs covering indexes', () => {
+  const planOf = (sql: string, params: unknown[] = []) =>
+    getDb().all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, params).map(r => r.detail).join(' ');
+
+  // started_at/completed_at sit after the step_results blob, so a non-covering read walks it.
+  it('answers date-ranged report reads from the index alone', () => {
+    expect(planOf(
+      `SELECT status, completed_at, plan_id FROM test_plan_runs WHERE trigger_type = 'scheduled' AND started_at >= ?`,
       ['2026-01-01'],
-    ).map(r => r.detail).join(' ');
-    expect(plan).toContain('idx_test_plan_runs_trigger_started');
+    )).toContain('COVERING INDEX idx_test_plan_runs_scheduled_cover');
+  });
+
+  it('answers the wave feed aggregate from the index alone', () => {
+    expect(planOf(
+      `SELECT wave_id, schedule_id, MIN(started_at), MAX(completed_at), COUNT(*), SUM(status = 'failed')
+       FROM test_plan_runs WHERE trigger_type = 'scheduled' AND wave_id IS NOT NULL GROUP BY wave_id`,
+    )).toMatch(/COVERING INDEX idx_test_plan_runs_(wave|scheduled)_cover/);
   });
 });
 
